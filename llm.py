@@ -5,7 +5,7 @@ import os
 from google import genai
 from google.genai import types
 
-MODEL_ID = "gemini-3.5-flash"
+MODEL_ID = "gemini-3.1-flash-lite"
 
 SYSTEM_INSTRUCTION = """You are a dictation post-processor. You receive a raw speech-to-text transcript and return a cleaned version.
 
@@ -51,4 +51,9 @@ def polish(raw_transcript: str, detected_language: str = "", system_instruction:
             max_output_tokens=2048,
         ),
     )
-    return (resp.text or "").strip()
+    text = (resp.text or "").strip()
+    # Fallback: lite models occasionally return empty for trivial inputs ("okay", "yes").
+    # Return the raw transcript so the user isn't left with nothing pasted.
+    if not text:
+        return raw_transcript.strip()
+    return text
