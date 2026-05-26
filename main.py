@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pynput import keyboard
+from PySide6.QtCore import QMetaObject, Qt
+from PySide6.QtWidgets import QApplication
 
 import config as cfg_mod
 from audio import Recorder, SAMPLE_RATE, pad_to_min_duration
@@ -22,8 +24,9 @@ from stt import transcribe
 from llm import polish
 from paste import paste_text
 from tray import Tray
-from feedback import setup_logging, beep_start, beep_stop, toast
+from feedback import setup_logging, toast
 from mic_control import unmute_default_mic
+from overlay import Overlay
 
 CFG = cfg_mod.load()
 
@@ -52,7 +55,9 @@ _recording_lock = threading.Lock()  # protects _recording transitions
 _watchdog: threading.Timer | None = None
 _processing_lock = threading.Lock()
 _tray: Tray | None = None
+_overlay: Overlay | None = None
 _listener: keyboard.Listener | None = None
+_qt_app: QApplication | None = None
 
 # Safety cap: if we somehow miss a key release, force-stop after this long.
 MAX_RECORDING_SECONDS = 60
@@ -61,6 +66,8 @@ MAX_RECORDING_SECONDS = 60
 def _set_state(state: str) -> None:
     if _tray is not None:
         _tray.set_state(state)
+    if _overlay is not None:
+        _overlay.set_state(state)
 
 
 def _process(audio, rate: int) -> None:
@@ -113,8 +120,6 @@ def _stop_and_process(reason: str) -> None:
     audio, rate = _recorder.stop()
     dur = audio.size / rate
     logger.info("record stop [%s] (%.2fs @ %dHz)", reason, dur, rate)
-    if CFG.enable_beeps:
-        beep_stop()
     threading.Thread(target=_process, args=(audio, rate), daemon=True).start()
 
 
@@ -135,8 +140,6 @@ def _on_press(key):
         _recording = True
     logger.info("record start")
     _set_state("recording")
-    if CFG.enable_beeps:
-        beep_start()
     try:
         _recorder.start()
     except Exception as e:
@@ -163,6 +166,20 @@ def _on_quit() -> None:
     logger.info("quit requested")
     if _listener is not None:
         _listener.stop()
+    if _overlay is not None:
+        _overlay.stop()
+    # Tray.run blocks in its own thread; calling icon.stop() ends that loop.
+    if _tray is not None:
+        try:
+            _tray.stop()
+        except Exception:
+            pass
+    # Quit Qt event loop on the main thread.
+    if _qt_app is not None:
+        try:
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.QueuedConnection)
+        except Exception:
+            pass
 
 
 def _persist_mic_device(idx: int | None) -> None:
@@ -193,7 +210,7 @@ def _on_select_device(idx: int | None) -> None:
 
 
 def main() -> int:
-    global _tray, _listener
+    global _tray, _overlay, _listener, _qt_app
     for var in ("GROQ_API_KEY", "GOOGLE_API_KEY"):
         if not os.environ.get(var):
             msg = f"{var} not set in .env"
@@ -204,6 +221,13 @@ def main() -> int:
     if CFG.auto_unmute_mic:
         ok, msg = unmute_default_mic(min_volume=CFG.min_mic_volume)
         logger.info("mic unmute: ok=%s %s", ok, msg)
+
+    # Qt event loop MUST run on the main thread on Windows. Create the QApplication
+    # here and run app.exec() at the end. The tray (pystray) moves to a worker thread.
+    _qt_app = QApplication.instance() or QApplication(sys.argv)
+    _qt_app.setQuitOnLastWindowClosed(False)  # closing the overlay must not quit the app
+
+    _overlay = Overlay()
 
     _listener = keyboard.Listener(on_press=_on_press, on_release=_on_release)
     _listener.start()
@@ -216,7 +240,10 @@ def main() -> int:
         on_select_device=_on_select_device,
         show_all_backends=CFG.show_all_backends,
     )
-    _tray.run()  # blocks
+    # Tray runs its Win32 message pump in a daemon thread.
+    threading.Thread(target=_tray.run, daemon=True, name="tray-msgpump").start()
+
+    _qt_app.exec()  # blocks until QApplication.quit()
     logger.info("stopped")
     return 0
 

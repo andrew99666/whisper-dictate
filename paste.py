@@ -1,6 +1,7 @@
 """Clipboard + auto-paste into the focused window, with clipboard restore."""
 from __future__ import annotations
 
+import ctypes
 import logging
 import time
 import pyperclip
@@ -8,6 +9,21 @@ from pynput.keyboard import Controller, Key, KeyCode
 
 _kbd = Controller()
 _logger = logging.getLogger("whisper-dictate")
+
+
+def _foreground_window_name() -> str:
+    """Return the title of the currently-focused window (Win32). Empty on failure."""
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        length = user32.GetWindowTextLengthW(hwnd) + 1
+        buf = ctypes.create_unicode_buffer(length)
+        user32.GetWindowTextW(hwnd, buf, length)
+        return buf.value
+    except Exception:
+        return ""
 
 
 def _safe_get_clipboard() -> str:
@@ -41,7 +57,7 @@ def _send_paste_chord() -> None:
     _kbd.release(Key.ctrl)
 
 
-def paste_text(text: str, restore_delay: float = 0.5, send_keys: bool = True) -> None:
+def paste_text(text: str, restore_delay: float = 0.2, send_keys: bool = True) -> None:
     """Copy `text` to clipboard, send Ctrl+V, then restore the previous clipboard."""
     if not text:
         _logger.debug("paste: empty text, skipping")
@@ -54,8 +70,13 @@ def paste_text(text: str, restore_delay: float = 0.5, send_keys: bool = True) ->
         _logger.warning("paste: clipboard write mismatch — wrote %d chars, read back %d",
                         len(text), len(written))
     if send_keys:
-        time.sleep(0.08)  # let OS register the new clipboard before the paste chord
-        _logger.debug("paste: sending Ctrl+V")
+        # Re-verify clipboard contents in case something mutated them between write and paste.
+        pre_paste = _safe_get_clipboard()
+        if pre_paste != text:
+            _logger.warning("paste: clipboard changed before paste — expected %d chars, found %d",
+                            len(text), len(pre_paste))
+        win_title = _foreground_window_name()
+        _logger.info("paste: sending Ctrl+V into window=%r", win_title[:80])
         _send_paste_chord()
         _logger.debug("paste: Ctrl+V sent")
     time.sleep(restore_delay)
