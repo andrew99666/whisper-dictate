@@ -83,16 +83,20 @@ class Tray:
         on_quit: Callable[[], None],
         current_device: int | None,
         on_select_device: Callable[[int | None], None],
+        current_output_mode: str = "paste",
+        on_select_output_mode: Callable[[str], None] | None = None,
         show_all_backends: bool = False,
     ):
         self._on_quit = on_quit
         self._current_device = current_device
         self._on_select_device = on_select_device
+        self._current_output_mode = current_output_mode
+        self._on_select_output_mode = on_select_output_mode
 
         device_items: list[pystray.MenuItem] = [
             pystray.MenuItem(
                 "System default",
-                self._make_select(None),
+                self._make_select_device(None),
                 checked=lambda item: self._current_device is None,
                 radio=True,
             )
@@ -101,11 +105,26 @@ class Tray:
             device_items.append(
                 pystray.MenuItem(
                     label,
-                    self._make_select(idx),
+                    self._make_select_device(idx),
                     checked=lambda item, i=idx: self._current_device == i,
                     radio=True,
                 )
             )
+
+        output_items = [
+            pystray.MenuItem(
+                "Paste (Ctrl+V)",
+                self._make_select_output("paste"),
+                checked=lambda item: self._current_output_mode == "paste",
+                radio=True,
+            ),
+            pystray.MenuItem(
+                "Type characters",
+                self._make_select_output("type"),
+                checked=lambda item: self._current_output_mode == "type",
+                radio=True,
+            ),
+        ]
 
         self.icon = pystray.Icon(
             "whisper-dictate",
@@ -113,16 +132,27 @@ class Tray:
             _TITLES["idle"],
             menu=pystray.Menu(
                 pystray.MenuItem("Input device", pystray.Menu(*device_items)),
+                pystray.MenuItem("Output mode", pystray.Menu(*output_items)),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self._quit),
             ),
         )
 
-    def _make_select(self, idx: int | None):
+    def _make_select_device(self, idx: int | None):
         def handler(icon, item):
             self._current_device = idx
             try:
                 self._on_select_device(idx)
+            finally:
+                self.icon.update_menu()
+        return handler
+
+    def _make_select_output(self, mode: str):
+        def handler(icon, item):
+            self._current_output_mode = mode
+            try:
+                if self._on_select_output_mode is not None:
+                    self._on_select_output_mode(mode)
             finally:
                 self.icon.update_menu()
         return handler

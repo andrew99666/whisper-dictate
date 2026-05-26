@@ -20,6 +20,7 @@ class Config:
     auto_unmute_mic: bool = True           # unmute the default input on startup
     min_mic_volume: float = 0.6            # raise mic volume to at least this if lower
     show_all_backends: bool = False        # tray menu: show every backend (MME/WASAPI/etc) instead of just WASAPI
+    output_mode: str = "paste"             # "paste" (Ctrl+V) or "type" (char-by-char via SendInput)
 
 
 def load(path: str = CONFIG_PATH) -> Config:

@@ -22,7 +22,7 @@ import config as cfg_mod
 from audio import Recorder, SAMPLE_RATE, pad_to_min_duration
 from stt import transcribe
 from llm import polish
-from paste import paste_text
+from paste import paste_text, type_text
 from tray import Tray
 from feedback import setup_logging, toast
 from mic_control import unmute_default_mic
@@ -96,9 +96,12 @@ def _process(audio, rate: int) -> None:
                 toast("Whisper Dictate — LLM error", str(e)[:200])
             # Fall back to raw transcript so user isn't left with nothing
             polished = txn.text
-        logger.info("polished=%r", polished)
+        logger.info("polished=%r mode=%s", polished, CFG.output_mode)
         if polished:
-            paste_text(polished)
+            if CFG.output_mode == "type":
+                type_text(polished)
+            else:
+                paste_text(polished)
     except Exception:
         logger.exception("pipeline crashed")
         traceback.print_exc()
@@ -209,6 +212,35 @@ def _on_select_device(idx: int | None) -> None:
         logger.exception("failed to persist mic_device")
 
 
+def _persist_output_mode(mode: str) -> None:
+    """Write output_mode back into config.toml, preserving other lines."""
+    path = cfg_mod.CONFIG_PATH
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    new_line = f'output_mode = "{mode}"'
+    pattern = re.compile(r"^(?:#\s*)?output_mode\s*=\s*[^\n]*", re.MULTILINE)
+    if pattern.search(content):
+        content = pattern.sub(new_line, content, count=1)
+    else:
+        content = content.rstrip() + f"\n{new_line}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _on_select_output_mode(mode: str) -> None:
+    """Tray callback: switch output mode (paste vs type) and persist the choice."""
+    if mode not in ("paste", "type"):
+        return
+    logger.info("output_mode switch -> %s", mode)
+    CFG.output_mode = mode
+    try:
+        _persist_output_mode(mode)
+    except Exception:
+        logger.exception("failed to persist output_mode")
+
+
 def main() -> int:
     global _tray, _overlay, _listener, _qt_app
     for var in ("GROQ_API_KEY", "GOOGLE_API_KEY"):
@@ -238,6 +270,8 @@ def main() -> int:
         on_quit=_on_quit,
         current_device=CFG.mic_device,
         on_select_device=_on_select_device,
+        current_output_mode=CFG.output_mode,
+        on_select_output_mode=_on_select_output_mode,
         show_all_backends=CFG.show_all_backends,
     )
     # Tray runs its Win32 message pump in a daemon thread.

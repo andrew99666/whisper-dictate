@@ -26,3 +26,4 @@ min_audio_seconds = 1.0
 
 # Override the LLM polish prompt. Empty string = use the built-in default.
 custom_system_instruction = ""
+output_mode = "type"
