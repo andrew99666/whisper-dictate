@@ -139,3 +139,9 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 - No real-time streaming of the LLM polish output (the **type** mode types instantly but only *after* the LLM has finished)
 - Single hotkey, single polish prompt — no per-mode prompts (email, code, notes) yet
 - Bluetooth HFP profile management is Windows-controlled
+
+## License
+
+Source available under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and distribute for **non-commercial purposes**: personal use, research, education, hobby projects, charities, government use, etc.
+
+**Commercial use requires a separate paid license.** If you, your company, or your organization wants to use Whisper Dictate (or a derivative) commercially — including bundling it with a paid product, offering it as a hosted service, or deploying it inside a for-profit business — contact **andrew.poltavets@gmail.com** for commercial licensing terms.
