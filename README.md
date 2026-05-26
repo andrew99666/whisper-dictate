@@ -1,38 +1,52 @@
 # Whisper Dictate — Push-to-Talk Voice Dictation for Windows
 
-Free, open-source voice dictation for Windows. Hold a hotkey, speak, release — get clean text pasted into the focused app. A [Superwhisper](https://superwhisper.com) / [Wispr Flow](https://wisprflow.ai) alternative for Windows, built with [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription and [Gemini 3.5 Flash](https://ai.google.dev) for cleanup.
+Free, open-source voice dictation for Windows. Hold a hotkey, speak, release — get clean text inserted into the focused app in about **1 second**, end-to-end. A [Superwhisper](https://superwhisper.com) / [Wispr Flow](https://wisprflow.ai) alternative that runs on Windows, uses [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription, and [Gemini 3.1 Flash-Lite](https://ai.google.dev) for cleanup.
 
 Auto-detects **English and Russian** per utterance (Whisper supports 99+ languages).
 
+## Speed
+
+End-to-end pipeline from key release to inserted text, measured on a typical residential connection:
+
+| Stage | Time |
+|---|---|
+| Audio resample 48kHz → 16kHz + FLAC encode | ~10ms |
+| Groq Whisper Large v3 Turbo (over network) | ~400ms |
+| Gemini 3.1 Flash-Lite polish | ~600ms |
+| Insert into focused app (paste or type) | ~10–50ms first char |
+| **Total** | **~1.0 second** |
+
+How that compares (public reports + our measurements):
+
+|  | Platform | Pricing | Total latency | Streaming UI |
+|---|---|---|---|---|
+| Superwhisper | macOS only | Subscription | ~0.5–1.5s | yes (partial text appears as you speak) |
+| Wispr Flow | macOS, Windows | Subscription | ~0.5–1s | yes |
+| **Whisper Dictate** | **Windows** | **Free (BYO API keys)** | **~1.0s** | type mode shows chars immediately on output |
+
+Honest read: speed is competitive, not dramatically different. The advantage is **free + open-source + Windows-native** + the optional **type mode** that injects characters one-by-one as soon as the LLM responds, so the first character is on screen within a few milliseconds.
+
 ## Features
 
-- **Push-to-talk hotkey** — hold Right Ctrl (configurable), speak, release. Transcribed in ~1–2 seconds.
-- **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio.
-- **Gemini 3.5 Flash polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language (no translation).
-- **Auto-paste** into any app that accepts Ctrl+V. Your existing clipboard is saved and restored.
-- **System tray** — pick your input microphone from a menu, see idle/recording/processing state at a glance.
-- **Auto-unmute mic** on app start (prevents the "Whisper hallucinates 'thank you'" silent-mic failure mode).
-- **Auto-start at login** (optional one-line PowerShell setup).
-- **Bilingual transcription** — Russian and English on the same hotkey, language detected per utterance.
+- **Push-to-talk hotkey** — hold Right Ctrl (configurable), speak, release.
+- **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio. FLAC upload at 16kHz keeps payload tiny.
+- **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. ~4× faster than 3.5-Flash in our A/B test ([bench_polish.py](bench_polish.py)) with judged quality parity.
+- **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
+- **Two output modes** (right-click tray → Output mode):
+  - **Paste** — clipboard + Ctrl+V. Fast, works almost everywhere, preserves your previous clipboard.
+  - **Type** — characters injected one-by-one via Win32 `SendInput` with `KEYEVENTF_UNICODE`. Bypasses keyboard layout (Cyrillic works regardless of system locale), works in apps that reject paste, gives instant visible feedback.
+- **System tray menu** — pick input mic from a WASAPI device list, switch output mode, quit.
+- **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
+- **Auto-start at login** (optional one-line PowerShell).
+- **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
 
-## Why
+## Why this exists
 
-Polished dictation tools like Superwhisper and MacWhisper are macOS-only; Wispr Flow is a paid subscription. This is a small Python clone (~800 LOC) that does the same core job on Windows. You bring your own API keys; cost is negligible.
-
-|  | Superwhisper | Wispr Flow | Whisper Dictate |
-|---|---|---|---|
-| Platform | macOS | macOS, Windows | Windows |
-| Pricing | Subscription | Subscription | Free (BYO API keys) |
-| Source available | No | No | Yes |
-| Transcription | Local Whisper | Cloud | Groq Whisper Large v3 Turbo |
-| LLM cleanup | Yes | Yes | Gemini 3.5 Flash |
-| Custom prompts | Yes | Yes | Yes (edit `llm.py`) |
-
-Typical cost: a few cents per day of heavy dictation.
+Polished dictation tools like Superwhisper and MacWhisper are macOS-only. Wispr Flow runs on Windows but it's a paid subscription. This is a small Python implementation (~1100 LOC) doing the same core job on Windows. You bring your own API keys; the per-dictation cost is fractions of a cent.
 
 ## Install
 
-Windows 10/11, Python 3.11+, a [Groq API key](https://console.groq.com/keys), and a [Google AI Studio key for Gemini](https://aistudio.google.com/app/apikey). Both have free tiers generous enough for personal use.
+Windows 10/11, Python 3.11+, a [Groq API key](https://console.groq.com/keys), and a [Google AI Studio key for Gemini](https://aistudio.google.com/app/apikey). Both have free tiers usable for personal use (Gemini Flash-Lite's free tier is generous; 3.5-Flash hits 20/day quickly).
 
 ```powershell
 git clone https://github.com/andrew99666/whisper-dictate.git
@@ -55,7 +69,7 @@ Run (no console window):
 .\.venv\Scripts\pythonw.exe main.py
 ```
 
-Look for the gray circle in your system tray. Hold **Right Ctrl**, speak, release — text appears in whatever window has focus.
+A gray circle icon appears in your system tray. Hold **Right Ctrl**, speak, release — text appears in whatever window has focus.
 
 ## Auto-start at login
 
@@ -75,44 +89,53 @@ To disable later: delete the shortcut, or toggle off in **Settings → Apps → 
 All keys in `config.toml` are optional; defaults apply when absent.
 
 ```toml
-hotkey = "ctrl_r"              # any pynput Key name: ctrl_r, ctrl_l, f9, menu, ...
-# mic_device = 1               # tray menu also sets this; leave blank for system default
+hotkey = "ctrl_r"                # any pynput Key name: ctrl_r, ctrl_l, f9, menu, ...
+# mic_device = 1                 # tray menu also sets this; leave blank for system default
 auto_unmute_mic = true
 min_mic_volume = 0.6
-enable_beeps = true
-enable_toasts = true
-show_all_backends = false      # tray menu: true = include MME/DirectSound/WDM-KS endpoints
+show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
+output_mode = "paste"            # "paste" (Ctrl+V) or "type" (char-by-char via SendInput)
+min_audio_seconds = 1.0          # pad short clips with trailing silence
+custom_system_instruction = ""   # override the LLM polish prompt; empty = use the default
 ```
 
-The LLM polish prompt lives in [`llm.py`](llm.py) — edit `SYSTEM_INSTRUCTION` to add modes (format as bullet points, summarize, translate to English, etc.).
+The LLM polish prompt lives in [`llm.py`](llm.py) — edit `SYSTEM_INSTRUCTION` to add custom modes (format as bullet points, summarize, translate, etc.).
 
 ## How it works
 
 ```
-Right Ctrl down  →  sounddevice.rec() into numpy buffer
-Right Ctrl up    →  stop, trim to actual duration
-                 →  POST audio (native sample rate) to Groq Whisper
-                 →  POST transcript + detected language to Gemini 3.5 Flash
-                 →  set clipboard, send Ctrl+V to focused window
-                 →  restore previous clipboard
+Right Ctrl down  →  sounddevice.rec() into numpy buffer (native device rate)
+Right Ctrl up    →  stop, trim
+                 →  scipy.signal.resample_poly to 16kHz, encode as FLAC
+                 →  POST to Groq Whisper Large v3 Turbo
+                 →  POST transcript + detected language to Gemini 3.1 Flash-Lite
+                 →  paste (clipboard + Ctrl+V) OR type (SendInput Unicode) into focused window
 ```
 
-End-to-end latency: ~1.5–2.5 seconds from key release to paste.
+## Output modes — when to use which
+
+- **Paste** is the default. Faster wall-clock total, works in any app that accepts Ctrl+V. Preserves your previous clipboard.
+- **Type** is better when:
+  - The app rejects synthetic paste (some web inputs, password fields)
+  - You want characters to appear progressively (feels instant)
+  - You're dictating Russian/Cyrillic into a system with a non-Russian default keyboard layout — `SendInput` with `KEYEVENTF_UNICODE` bypasses the layout and never produces garbled chars
 
 ## Troubleshooting
 
-- **Whisper returns "Thank you" instead of my speech.** Your mic is sending silence. "Thank you" is Whisper's hallucination signature for empty audio (trained on lots of YouTube outros). Check Windows Sound Settings → Input → test mic level. The app auto-unmutes by default, but a hardware mute switch overrides this.
-- **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The app retries and auto-falls back to the system default mic; if you see persistent WASAPI errors on a specific device, pick "System default" from the tray menu.
-- **Only `v` is pasted, not the full text.** The Ctrl modifier didn't register in the target app. Increase the inter-key delay in `_send_paste_chord` (paste.py).
-- **Bluetooth headphones drop to low-fi audio while recording.** Windows switches the BT profile to HFP for mic capture, and A2DP restoration after the mic is released is Windows-controlled and not always immediate. Use a USB or built-in mic for dictation — the BT headset can keep playing music in A2DP.
+- **Whisper returns "Thank you" instead of my speech.** Your mic is sending silence. "Thank you" is Whisper's hallucination signature for empty audio. Check Windows Sound Settings → Input → test mic level. The app auto-unmutes on startup but a hardware mute switch overrides that.
+- **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The app retries and auto-falls back to the system default mic if your configured WASAPI endpoint fails to open. If failures persist, pick "System default" from the tray.
+- **Only `v` is pasted, not the full text.** The Ctrl modifier didn't register in the target app. The paste chord already has 30ms inter-key gaps to prevent this; if it still happens, switch to **Type** mode.
+- **Paste lands in the wrong window.** Focus shifted between key release and the paste. The log records the foreground window title at paste time — search for `paste: sending Ctrl+V into window=...` to confirm.
+- **Bluetooth headphones drop to low-fi audio while recording.** Windows switches BT to HFP profile for mic capture, and A2DP restoration is OS-controlled. Use a USB or built-in mic for dictation; the BT headset can keep playing music in A2DP.
 
 ## Tech
 
-Python 3.12 · [sounddevice](https://python-sounddevice.readthedocs.io) (PortAudio) · [pynput](https://pynput.readthedocs.io) · [pystray](https://github.com/moses-palmer/pystray) · [pyperclip](https://pyperclip.readthedocs.io) · [pycaw](https://github.com/AndreMiras/pycaw) · [groq](https://github.com/groq/groq-python) · [google-genai](https://github.com/googleapis/python-genai)
+Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating overlay · [sounddevice](https://python-sounddevice.readthedocs.io) + [soundfile](https://python-soundfile.readthedocs.io) + [scipy](https://scipy.org) for capture, resample, and FLAC encode · [pynput](https://pynput.readthedocs.io) for the global hotkey · [pystray](https://github.com/moses-palmer/pystray) for the system tray · [pyperclip](https://pyperclip.readthedocs.io) for the clipboard · [pycaw](https://github.com/AndreMiras/pycaw) for mic mute control · [groq](https://github.com/groq/groq-python) + [google-genai](https://github.com/googleapis/python-genai) for the model APIs
 
 ## Limitations
 
-- Windows only (uses `winsound`, `winotify`, `pycaw`)
+- Windows only (uses `winsound`, `winotify`, `pycaw`, Win32 SendInput, DWM APIs)
 - Cloud transcription only — no offline Whisper mode
-- No real-time streaming, no overlay UI, single hotkey, single polish prompt
+- No real-time streaming of the LLM polish output (the **type** mode types instantly but only *after* the LLM has finished)
+- Single hotkey, single polish prompt — no per-mode prompts (email, code, notes) yet
 - Bluetooth HFP profile management is Windows-controlled
