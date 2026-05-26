@@ -89,11 +89,19 @@ def _process(audio, rate: int) -> None:
         if not txn.text.strip():
             return
 
-        if CFG.output_mode == "type":
+        # Raw mode: skip the LLM entirely; output the Whisper transcript as-is.
+        if CFG.polish_mode == "raw":
+            logger.info("raw mode: skipping LLM (output_mode=%s)", CFG.output_mode)
+            if CFG.output_mode == "type":
+                type_text(txn.text)
+            else:
+                paste_text(txn.text)
+        elif CFG.output_mode == "type":
             # Stream the polish — characters appear as Gemini generates them.
+            instruction = CFG.polish_modes.get(CFG.polish_mode, "")
             full_text = ""
             try:
-                stream = polish_stream(txn.text, txn.language, CFG.custom_system_instruction)
+                stream = polish_stream(txn.text, txn.language, instruction)
                 full_text = type_stream(stream)
             except Exception as e:
                 logger.exception("LLM streaming failed")
@@ -110,17 +118,18 @@ def _process(audio, rate: int) -> None:
                 if not full_text.strip():
                     type_text(txn.text)
                     full_text = txn.text
-            logger.info("polished (streamed)=%r", full_text)
+            logger.info("polished (streamed, mode=%s)=%r", CFG.polish_mode, full_text)
         else:
             # Paste mode: full polish, single Ctrl+V.
+            instruction = CFG.polish_modes.get(CFG.polish_mode, "")
             try:
-                polished = polish(txn.text, txn.language, CFG.custom_system_instruction)
+                polished = polish(txn.text, txn.language, instruction)
             except Exception as e:
                 logger.exception("LLM polish failed")
                 if CFG.enable_toasts:
                     toast("Whisper Dictate — LLM error", str(e)[:200])
                 polished = txn.text
-            logger.info("polished=%r", polished)
+            logger.info("polished (mode=%s)=%r", CFG.polish_mode, polished)
             if polished:
                 paste_text(polished)
     except Exception:
@@ -262,6 +271,36 @@ def _on_select_output_mode(mode: str) -> None:
         logger.exception("failed to persist output_mode")
 
 
+def _persist_polish_mode(mode: str) -> None:
+    """Write polish_mode back into config.toml, preserving other lines."""
+    path = cfg_mod.CONFIG_PATH
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    new_line = f'polish_mode = "{mode}"'
+    pattern = re.compile(r"^(?:#\s*)?polish_mode\s*=\s*[^\n]*", re.MULTILINE)
+    if pattern.search(content):
+        content = pattern.sub(new_line, content, count=1)
+    else:
+        content = content.rstrip() + f"\n{new_line}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _on_select_polish_mode(mode: str) -> None:
+    """Tray callback: switch the active polish mode and persist."""
+    valid = set(CFG.polish_modes.keys()) | {"raw"}
+    if mode not in valid:
+        return
+    logger.info("polish_mode switch -> %s", mode)
+    CFG.polish_mode = mode
+    try:
+        _persist_polish_mode(mode)
+    except Exception:
+        logger.exception("failed to persist polish_mode")
+
+
 def main() -> int:
     global _tray, _overlay, _listener, _qt_app
     for var in ("GROQ_API_KEY", "GOOGLE_API_KEY"):
@@ -287,12 +326,23 @@ def main() -> int:
     logger.info("started (hotkey=%s, mic_device=%s)", CFG.hotkey, CFG.mic_device)
     print(f"Whisper Dictate ready. Hold {CFG.hotkey} to dictate. Right-click tray icon to quit.")
 
+    # Build ordered list of (key, label) for the Polish-mode submenu.
+    # "raw" always appears even if user removed it from polish_modes.
+    polish_mode_keys = list(CFG.polish_modes.keys()) + ["raw"]
+    polish_mode_items = [
+        (k, cfg_mod.POLISH_MODE_LABELS.get(k, k.replace("_", " ").title()))
+        for k in polish_mode_keys
+    ]
+
     _tray = Tray(
         on_quit=_on_quit,
         current_device=CFG.mic_device,
         on_select_device=_on_select_device,
         current_output_mode=CFG.output_mode,
         on_select_output_mode=_on_select_output_mode,
+        current_polish_mode=CFG.polish_mode,
+        polish_mode_items=polish_mode_items,
+        on_select_polish_mode=_on_select_polish_mode,
         show_all_backends=CFG.show_all_backends,
     )
     # Tray runs its Win32 message pump in a daemon thread.

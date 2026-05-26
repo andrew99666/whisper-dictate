@@ -85,6 +85,9 @@ class Tray:
         on_select_device: Callable[[int | None], None],
         current_output_mode: str = "paste",
         on_select_output_mode: Callable[[str], None] | None = None,
+        current_polish_mode: str = "default",
+        polish_mode_items: list[tuple[str, str]] | None = None,
+        on_select_polish_mode: Callable[[str], None] | None = None,
         show_all_backends: bool = False,
     ):
         self._on_quit = on_quit
@@ -92,6 +95,8 @@ class Tray:
         self._on_select_device = on_select_device
         self._current_output_mode = current_output_mode
         self._on_select_output_mode = on_select_output_mode
+        self._current_polish_mode = current_polish_mode
+        self._on_select_polish_mode = on_select_polish_mode
 
         device_items: list[pystray.MenuItem] = [
             pystray.MenuItem(
@@ -126,16 +131,32 @@ class Tray:
             ),
         ]
 
+        polish_items: list[pystray.MenuItem] = []
+        for key, label in (polish_mode_items or []):
+            polish_items.append(
+                pystray.MenuItem(
+                    label,
+                    self._make_select_polish(key),
+                    checked=lambda item, k=key: self._current_polish_mode == k,
+                    radio=True,
+                )
+            )
+
+        menu_entries: list = [
+            pystray.MenuItem("Polish mode", pystray.Menu(*polish_items)) if polish_items
+            else None,
+            pystray.MenuItem("Input device", pystray.Menu(*device_items)),
+            pystray.MenuItem("Output mode", pystray.Menu(*output_items)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", self._quit),
+        ]
+        menu_entries = [e for e in menu_entries if e is not None]
+
         self.icon = pystray.Icon(
             "whisper-dictate",
             _ICONS["idle"],
             _TITLES["idle"],
-            menu=pystray.Menu(
-                pystray.MenuItem("Input device", pystray.Menu(*device_items)),
-                pystray.MenuItem("Output mode", pystray.Menu(*output_items)),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Quit", self._quit),
-            ),
+            menu=pystray.Menu(*menu_entries),
         )
 
     def _make_select_device(self, idx: int | None):
@@ -153,6 +174,16 @@ class Tray:
             try:
                 if self._on_select_output_mode is not None:
                     self._on_select_output_mode(mode)
+            finally:
+                self.icon.update_menu()
+        return handler
+
+    def _make_select_polish(self, mode: str):
+        def handler(icon, item):
+            self._current_polish_mode = mode
+            try:
+                if self._on_select_polish_mode is not None:
+                    self._on_select_polish_mode(mode)
             finally:
                 self.icon.update_menu()
         return handler

@@ -27,3 +27,17 @@ min_audio_seconds = 1.0
 # Override the LLM polish prompt. Empty string = use the built-in default.
 custom_system_instruction = ""
 output_mode = "type"
+
+# Polish mode — selects which LLM prompt to use. Built-in modes:
+#   "default"      — cleanup + clarity (strip fillers, fix grammar)
+#   "email"        — formal-ish, paragraphs, suitable for an email body
+#   "chat"         — short, casual, conversational
+#   "code"         — preserves technical terms and symbols, light fixes only
+#   "translate_en" — translates the input to English
+#   "raw"          — skips the LLM entirely, outputs the Whisper transcript as-is
+# Tray menu also lets you switch modes at runtime.
+polish_mode = "default"
+
+# Optional: override built-in prompts or add your own modes here.
+# [polish_modes]
+# my_custom = """Your prompt..."""

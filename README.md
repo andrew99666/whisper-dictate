@@ -32,10 +32,19 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
 - **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio. FLAC upload at 16kHz keeps payload tiny.
 - **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. ~4× faster than 3.5-Flash in our A/B test ([bench_polish.py](bench_polish.py)) with judged quality parity.
 - **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
+- **Six polish modes** (right-click tray → Polish mode):
+  - **Default** — cleanup + clarity rewrite, language-preserving
+  - **Email** — formats as an email body, keeps your greetings/sign-offs, no aggressive paraphrasing
+  - **Chat** — short, casual, conversational; minimal grammar editing
+  - **Code** — preserves technical terms, command syntax, and symbols verbatim
+  - **Translate to English** — translates any language to English
+  - **Raw** — skips the LLM entirely; outputs Whisper's transcript as-is (useful for commands, code, or when you don't want any rewriting)
+
+  All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
 - **Two output modes** (right-click tray → Output mode):
   - **Paste** — clipboard + Ctrl+V. Fast, works almost everywhere, preserves your previous clipboard.
   - **Type (streaming)** — characters injected one-by-one via Win32 `SendInput` with `KEYEVENTF_UNICODE` **as Gemini generates them** (chunks arrive over the LLM stream and are typed immediately). Bypasses keyboard layout (Cyrillic works regardless of system locale), works in apps that reject paste, and gives the fastest perceived latency — the first words land on screen within a few hundred ms of the LLM responding. A 4-second per-chunk idle timeout keeps the pipeline from hanging if Gemini holds the stream open past the last chunk.
-- **System tray menu** — pick input mic from a WASAPI device list, switch output mode, quit.
+- **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, switch output mode, quit. All selections persist to `config.toml` automatically.
 - **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
 - **Auto-start at login** (optional one-line PowerShell).
 - **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
@@ -95,11 +104,15 @@ auto_unmute_mic = true
 min_mic_volume = 0.6
 show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
 output_mode = "paste"            # "paste" (Ctrl+V) or "type" (char-by-char via SendInput)
+polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
-custom_system_instruction = ""   # override the LLM polish prompt; empty = use the default
+
+# Optional: override built-in polish prompts or add your own modes.
+# [polish_modes]
+# my_brief = """Make it shorter than 20 words. Preserve the language."""
 ```
 
-The LLM polish prompt lives in [`llm.py`](llm.py) — edit `SYSTEM_INSTRUCTION` to add custom modes (format as bullet points, summarize, translate, etc.).
+The built-in polish prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`). To customize, either edit them there or add a `[polish_modes]` table to `config.toml` — user values are merged on top of the defaults. To use a custom mode in the tray, add its key to `POLISH_MODE_LABELS` in `config.py`.
 
 ## How it works
 
@@ -108,9 +121,19 @@ Right Ctrl down  →  sounddevice.rec() into numpy buffer (native device rate)
 Right Ctrl up    →  stop, trim
                  →  scipy.signal.resample_poly to 16kHz, encode as FLAC
                  →  POST to Groq Whisper Large v3 Turbo
-                 →  POST transcript + detected language to Gemini 3.1 Flash-Lite
+                 →  if polish_mode == "raw": skip LLM, use the transcript verbatim
+                    else: POST transcript + active polish prompt to Gemini 3.1 Flash-Lite
                  →  paste (clipboard + Ctrl+V) OR type (SendInput Unicode) into focused window
 ```
+
+## Polish modes — when to use which
+
+- **Default** — everyday dictation. Cleans fillers, fixes grammar, lightly rewrites for clarity. Use this most of the time.
+- **Email** — when dictating an email body. Preserves greetings ("Hi John") and sign-offs ("Thanks, Andrew") you actually said; does not invent them. Structures into paragraphs naturally.
+- **Chat** — short messages where you want minimal editing. Doesn't pad fragments into full sentences.
+- **Code** — dictating technical content, commands, or speaking code aloud (e.g. `git push origin main` stays verbatim instead of becoming "Git pushes origin to main").
+- **Translate to English** — output is always English, regardless of input language. Whisper still detects the source language for transcription accuracy.
+- **Raw** — bypasses Gemini entirely. Use for proper nouns the LLM keeps mangling, exact quotes, search queries, or anywhere you want zero rewriting.
 
 ## Output modes — when to use which
 
@@ -137,7 +160,8 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 - Windows only (uses `winsound`, `winotify`, `pycaw`, Win32 SendInput, DWM APIs)
 - Cloud transcription only — no offline Whisper mode
 - Whisper itself isn't streamed — STT (~400ms) blocks before the LLM can start, even in streaming type mode
-- Single hotkey, single polish prompt — no per-mode prompts (email, code, notes) yet
+- Single PTT hotkey (no per-mode hotkeys — polish mode is switched via the tray menu)
+- Doesn't work in games that bypass the Windows input message queue (DirectInput / kernel-level input filtering) — no Python-level injection can reach them
 - Bluetooth HFP profile management is Windows-controlled
 
 ## License
