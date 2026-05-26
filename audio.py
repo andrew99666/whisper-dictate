@@ -9,13 +9,27 @@ from __future__ import annotations
 import io
 import time
 import wave
+from math import gcd
 import numpy as np
 import sounddevice as sd
+import soundfile as sf
+from scipy import signal
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "float32"
 MAX_RECORD_SECONDS = 120  # generous PTT ceiling; trimmed on stop()
+
+
+def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Anti-aliased polyphase resampling. Whisper runs at 16kHz internally —
+    sending higher rate audio just wastes upload bandwidth."""
+    if source_rate == target_rate or audio.size == 0:
+        return audio
+    g = gcd(source_rate, target_rate)
+    up = target_rate // g
+    down = source_rate // g
+    return signal.resample_poly(audio, up, down).astype(audio.dtype, copy=False)
 
 
 class Recorder:
@@ -124,3 +138,20 @@ def to_wav_bytes(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bytes:
 def save_wav(audio: np.ndarray, path: str, sample_rate: int = SAMPLE_RATE) -> None:
     with open(path, "wb") as f:
         f.write(to_wav_bytes(audio, sample_rate))
+
+
+def to_flac_bytes(audio: np.ndarray, sample_rate: int = SAMPLE_RATE,
+                  target_rate: int | None = SAMPLE_RATE) -> bytes:
+    """Encode mono audio as FLAC. If target_rate differs from sample_rate, resample first
+    (sending 16kHz to Whisper instead of 48kHz cuts upload size ~6x)."""
+    if target_rate is not None and target_rate != sample_rate:
+        audio = resample(audio, sample_rate, target_rate)
+        sample_rate = target_rate
+    if audio.dtype != np.int16:
+        clipped = np.clip(audio, -1.0, 1.0)
+        pcm = (clipped * 32767.0).astype(np.int16)
+    else:
+        pcm = audio
+    buf = io.BytesIO()
+    sf.write(buf, pcm, sample_rate, format="FLAC", subtype="PCM_16")
+    return buf.getvalue()

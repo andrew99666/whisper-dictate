@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from groq import Groq
 
-from audio import to_wav_bytes
+from audio import to_flac_bytes
 import numpy as np
 
 MODEL_ID = "whisper-large-v3-turbo"
@@ -29,11 +29,11 @@ def _get_client() -> Groq:
 
 
 def transcribe(audio: np.ndarray, sample_rate: int = 16_000) -> Transcription:
-    """Send audio buffer to Groq Whisper. No language hint -> auto-detect."""
-    wav_bytes = to_wav_bytes(audio, sample_rate)
+    """Send audio buffer to Groq Whisper as FLAC (smaller upload, lossless). Auto-detect language."""
+    flac_bytes = to_flac_bytes(audio, sample_rate)
     client = _get_client()
     resp = client.audio.transcriptions.create(
-        file=("audio.wav", wav_bytes, "audio/wav"),
+        file=("audio.flac", flac_bytes, "audio/flac"),
         model=MODEL_ID,
         response_format="verbose_json",  # includes detected language
         temperature=0.0,
