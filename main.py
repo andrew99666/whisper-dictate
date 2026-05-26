@@ -21,8 +21,8 @@ from PySide6.QtWidgets import QApplication
 import config as cfg_mod
 from audio import Recorder, SAMPLE_RATE, pad_to_min_duration
 from stt import transcribe
-from llm import polish
-from paste import paste_text, type_text
+from llm import polish, polish_stream
+from paste import paste_text, type_text, type_stream
 from tray import Tray
 from feedback import setup_logging, toast
 from mic_control import unmute_default_mic
@@ -88,19 +88,40 @@ def _process(audio, rate: int) -> None:
         logger.info("stt lang=%r text=%r", txn.language, txn.text)
         if not txn.text.strip():
             return
-        try:
-            polished = polish(txn.text, txn.language, CFG.custom_system_instruction)
-        except Exception as e:
-            logger.exception("LLM polish failed")
-            if CFG.enable_toasts:
-                toast("Whisper Dictate — LLM error", str(e)[:200])
-            # Fall back to raw transcript so user isn't left with nothing
-            polished = txn.text
-        logger.info("polished=%r mode=%s", polished, CFG.output_mode)
-        if polished:
-            if CFG.output_mode == "type":
-                type_text(polished)
+
+        if CFG.output_mode == "type":
+            # Stream the polish — characters appear as Gemini generates them.
+            full_text = ""
+            try:
+                stream = polish_stream(txn.text, txn.language, CFG.custom_system_instruction)
+                full_text = type_stream(stream)
+            except Exception as e:
+                logger.exception("LLM streaming failed")
+                if CFG.enable_toasts:
+                    toast("Whisper Dictate — LLM error", str(e)[:200])
+                # Only fall back to raw if nothing was typed yet; if some text
+                # was typed before the failure, leave it — typing the raw on top
+                # would duplicate content.
+                if not full_text:
+                    type_text(txn.text)
+                    full_text = txn.text
             else:
+                # Empty stream (lite model occasionally yields nothing) — fall back.
+                if not full_text.strip():
+                    type_text(txn.text)
+                    full_text = txn.text
+            logger.info("polished (streamed)=%r", full_text)
+        else:
+            # Paste mode: full polish, single Ctrl+V.
+            try:
+                polished = polish(txn.text, txn.language, CFG.custom_system_instruction)
+            except Exception as e:
+                logger.exception("LLM polish failed")
+                if CFG.enable_toasts:
+                    toast("Whisper Dictate — LLM error", str(e)[:200])
+                polished = txn.text
+            logger.info("polished=%r", polished)
+            if polished:
                 paste_text(polished)
     except Exception:
         logger.exception("pipeline crashed")

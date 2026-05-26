@@ -34,7 +34,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
 - **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
 - **Two output modes** (right-click tray → Output mode):
   - **Paste** — clipboard + Ctrl+V. Fast, works almost everywhere, preserves your previous clipboard.
-  - **Type** — characters injected one-by-one via Win32 `SendInput` with `KEYEVENTF_UNICODE`. Bypasses keyboard layout (Cyrillic works regardless of system locale), works in apps that reject paste, gives instant visible feedback.
+  - **Type (streaming)** — characters injected one-by-one via Win32 `SendInput` with `KEYEVENTF_UNICODE` **as Gemini generates them** (chunks arrive over the LLM stream and are typed immediately). Bypasses keyboard layout (Cyrillic works regardless of system locale), works in apps that reject paste, and gives the fastest perceived latency — the first words land on screen within a few hundred ms of the LLM responding. A 4-second per-chunk idle timeout keeps the pipeline from hanging if Gemini holds the stream open past the last chunk.
 - **System tray menu** — pick input mic from a WASAPI device list, switch output mode, quit.
 - **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
 - **Auto-start at login** (optional one-line PowerShell).
@@ -136,7 +136,7 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 
 - Windows only (uses `winsound`, `winotify`, `pycaw`, Win32 SendInput, DWM APIs)
 - Cloud transcription only — no offline Whisper mode
-- No real-time streaming of the LLM polish output (the **type** mode types instantly but only *after* the LLM has finished)
+- Whisper itself isn't streamed — STT (~400ms) blocks before the LLM can start, even in streaming type mode
 - Single hotkey, single polish prompt — no per-mode prompts (email, code, notes) yet
 - Bluetooth HFP profile management is Windows-controlled
 

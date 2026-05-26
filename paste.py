@@ -125,17 +125,8 @@ def _send_vk(vk: int) -> None:
     _user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(_INPUT))
 
 
-def type_text(text: str, char_delay: float = 0.003) -> None:
-    """Type `text` character-by-character via Win32 SendInput with KEYEVENTF_UNICODE.
-
-    Unicode-safe — handles Cyrillic and any BMP char regardless of the active
-    keyboard layout (no VkKeyScan translation, the OS injects the code point directly).
-    Surrogate pairs are sent for chars outside the BMP.
-    """
-    if not text:
-        return
-    win_title = _foreground_window_name()
-    _logger.info("type: %d chars into window=%r", len(text), win_title[:80])
+def _type_chars(text: str, char_delay: float) -> None:
+    """Type chars via SendInput. No logging — used by both type_text and type_stream."""
     for c in text:
         if c == "\n":
             _send_vk(_VK_RETURN)
@@ -152,6 +143,42 @@ def type_text(text: str, char_delay: float = 0.003) -> None:
                 _send_unicode_char(cp)
         if char_delay > 0:
             time.sleep(char_delay)
+
+
+def type_text(text: str, char_delay: float = 0.003) -> None:
+    """Type `text` character-by-character via Win32 SendInput with KEYEVENTF_UNICODE.
+
+    Unicode-safe — handles Cyrillic and any BMP char regardless of the active
+    keyboard layout (no VkKeyScan translation, the OS injects the code point directly).
+    Surrogate pairs are sent for chars outside the BMP.
+    """
+    if not text:
+        return
+    win_title = _foreground_window_name()
+    _logger.info("type: %d chars into window=%r", len(text), win_title[:80])
+    _type_chars(text, char_delay)
+
+
+def type_stream(chunks, char_delay: float = 0.003) -> str:
+    """Type chunks from an iterator as they arrive (e.g. an LLM stream).
+
+    Returns the concatenated text that was typed. Single log line for the whole
+    stream rather than per-chunk noise. Any chunk-yielding exception propagates
+    to the caller AFTER the partial text has been typed.
+    """
+    win_title = _foreground_window_name()
+    _logger.info("type-stream: into window=%r", win_title[:80])
+    parts: list[str] = []
+    try:
+        for chunk in chunks:
+            if not chunk:
+                continue
+            _type_chars(chunk, char_delay)
+            parts.append(chunk)
+    finally:
+        full = "".join(parts)
+        _logger.info("type-stream done: %d chars", len(full))
+    return full
 
 
 def paste_text(text: str, restore_delay: float = 0.2, send_keys: bool = True) -> None:
