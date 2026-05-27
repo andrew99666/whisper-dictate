@@ -83,8 +83,6 @@ class Tray:
         on_quit: Callable[[], None],
         current_device: int | None,
         on_select_device: Callable[[int | None], None],
-        current_output_mode: str = "paste",
-        on_select_output_mode: Callable[[str], None] | None = None,
         current_polish_mode: str = "default",
         polish_mode_items: list[tuple[str, str]] | None = None,
         on_select_polish_mode: Callable[[str], None] | None = None,
@@ -93,8 +91,6 @@ class Tray:
         self._on_quit = on_quit
         self._current_device = current_device
         self._on_select_device = on_select_device
-        self._current_output_mode = current_output_mode
-        self._on_select_output_mode = on_select_output_mode
         self._current_polish_mode = current_polish_mode
         self._on_select_polish_mode = on_select_polish_mode
 
@@ -116,21 +112,6 @@ class Tray:
                 )
             )
 
-        output_items = [
-            pystray.MenuItem(
-                "Paste (Ctrl+V)",
-                self._make_select_output("paste"),
-                checked=lambda item: self._current_output_mode == "paste",
-                radio=True,
-            ),
-            pystray.MenuItem(
-                "Type characters",
-                self._make_select_output("type"),
-                checked=lambda item: self._current_output_mode == "type",
-                radio=True,
-            ),
-        ]
-
         polish_items: list[pystray.MenuItem] = []
         for key, label in (polish_mode_items or []):
             polish_items.append(
@@ -146,7 +127,6 @@ class Tray:
             pystray.MenuItem("Polish mode", pystray.Menu(*polish_items)) if polish_items
             else None,
             pystray.MenuItem("Input device", pystray.Menu(*device_items)),
-            pystray.MenuItem("Output mode", pystray.Menu(*output_items)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         ]
@@ -164,16 +144,6 @@ class Tray:
             self._current_device = idx
             try:
                 self._on_select_device(idx)
-            finally:
-                self.icon.update_menu()
-        return handler
-
-    def _make_select_output(self, mode: str):
-        def handler(icon, item):
-            self._current_output_mode = mode
-            try:
-                if self._on_select_output_mode is not None:
-                    self._on_select_output_mode(mode)
             finally:
                 self.icon.update_menu()
         return handler

@@ -25,8 +25,8 @@ from PySide6.QtWidgets import QApplication
 import config as cfg_mod
 from audio import Recorder, SAMPLE_RATE, pad_to_min_duration
 from stt import transcribe
-from llm import polish, polish_stream
-from paste import paste_text, type_text, type_stream
+from llm import polish
+from paste import paste_text
 from tray import Tray
 from feedback import setup_logging, toast
 from mic_control import unmute_default_mic
@@ -138,38 +138,11 @@ def _process(audio, rate: int) -> None:
         if not txn.text.strip():
             return
 
-        # Raw mode: skip the LLM entirely; output the Whisper transcript as-is.
+        # Raw mode: skip the LLM entirely; paste the Whisper transcript as-is.
         if CFG.polish_mode == "raw":
-            logger.info("raw mode: skipping LLM (output_mode=%s)", CFG.output_mode)
-            if CFG.output_mode == "type":
-                type_text(txn.text)
-            else:
-                paste_text(txn.text)
-        elif CFG.output_mode == "type":
-            # Stream the polish — characters appear as Gemini generates them.
-            instruction = CFG.polish_modes.get(CFG.polish_mode, "")
-            full_text = ""
-            try:
-                stream = polish_stream(txn.text, txn.language, instruction)
-                full_text = type_stream(stream)
-            except Exception as e:
-                logger.exception("LLM streaming failed")
-                if CFG.enable_toasts:
-                    toast("Whisper Dictate — LLM error", str(e)[:200])
-                # Only fall back to raw if nothing was typed yet; if some text
-                # was typed before the failure, leave it — typing the raw on top
-                # would duplicate content.
-                if not full_text:
-                    type_text(txn.text)
-                    full_text = txn.text
-            else:
-                # Empty stream (lite model occasionally yields nothing) — fall back.
-                if not full_text.strip():
-                    type_text(txn.text)
-                    full_text = txn.text
-            logger.info("polished (streamed, mode=%s)=%r", CFG.polish_mode, full_text)
+            logger.info("raw mode: skipping LLM")
+            paste_text(txn.text)
         else:
-            # Paste mode: full polish, single Ctrl+V.
             instruction = CFG.polish_modes.get(CFG.polish_mode, "")
             try:
                 polished = polish(txn.text, txn.language, instruction)
@@ -177,7 +150,7 @@ def _process(audio, rate: int) -> None:
                 logger.exception("LLM polish failed")
                 if CFG.enable_toasts:
                     toast("Whisper Dictate — LLM error", str(e)[:200])
-                polished = txn.text
+                polished = txn.text  # fall back to raw transcript
             logger.info("polished (mode=%s)=%r", CFG.polish_mode, polished)
             if polished:
                 paste_text(polished)
@@ -287,35 +260,6 @@ def _on_select_device(idx: int | None) -> None:
         logger.exception("failed to persist mic_device")
 
 
-def _persist_output_mode(mode: str) -> None:
-    """Write output_mode back into config.toml, preserving other lines."""
-    path = cfg_mod.CONFIG_PATH
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    new_line = f'output_mode = "{mode}"'
-    pattern = re.compile(r"^(?:#\s*)?output_mode\s*=\s*[^\n]*", re.MULTILINE)
-    if pattern.search(content):
-        content = pattern.sub(new_line, content, count=1)
-    else:
-        content = content.rstrip() + f"\n{new_line}\n"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-
-def _on_select_output_mode(mode: str) -> None:
-    """Tray callback: switch output mode (paste vs type) and persist the choice."""
-    if mode not in ("paste", "type"):
-        return
-    logger.info("output_mode switch -> %s", mode)
-    CFG.output_mode = mode
-    try:
-        _persist_output_mode(mode)
-    except Exception:
-        logger.exception("failed to persist output_mode")
-
-
 def _persist_polish_mode(mode: str) -> None:
     """Write polish_mode back into config.toml, preserving other lines."""
     path = cfg_mod.CONFIG_PATH
@@ -383,8 +327,6 @@ def main() -> int:
         on_quit=_on_quit,
         current_device=CFG.mic_device,
         on_select_device=_on_select_device,
-        current_output_mode=CFG.output_mode,
-        on_select_output_mode=_on_select_output_mode,
         current_polish_mode=CFG.polish_mode,
         polish_mode_items=polish_mode_items,
         on_select_polish_mode=_on_select_polish_mode,

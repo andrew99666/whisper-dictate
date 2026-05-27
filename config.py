@@ -110,7 +110,6 @@ class Config:
     auto_unmute_mic: bool = True
     min_mic_volume: float = 0.6
     show_all_backends: bool = False
-    output_mode: str = "paste"             # "paste" (Ctrl+V) or "type" (char-by-char via SendInput)
     polish_mode: str = "default"           # active mode; "raw" skips LLM entirely
     polish_modes: dict[str, str] = field(default_factory=dict)  # populated from defaults + config.toml
 

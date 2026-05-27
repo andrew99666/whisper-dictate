@@ -13,18 +13,18 @@ End-to-end pipeline from key release to inserted text, measured on a typical res
 | Audio resample 48kHz → 16kHz + FLAC encode | ~10ms |
 | Groq Whisper Large v3 Turbo (over network) | ~400ms |
 | Gemini 3.1 Flash-Lite polish | ~600ms |
-| Insert into focused app (paste or type) | ~10–50ms first char |
+| Clipboard write + Ctrl+V into focused app | ~10ms |
 | **Total** | **~1.0 second** |
 
 How that compares (public reports + our measurements):
 
-|  | Platform | Pricing | Total latency | Streaming UI |
-|---|---|---|---|---|
-| Superwhisper | macOS only | Subscription | ~0.5–1.5s | yes (partial text appears as you speak) |
-| Wispr Flow | macOS, Windows | Subscription | ~0.5–1s | yes |
-| **Whisper Dictate** | **Windows** | **Free (BYO API keys)** | **~1.0s** | type mode shows chars immediately on output |
+|  | Platform | Pricing | Total latency |
+|---|---|---|---|
+| Superwhisper | macOS only | Subscription | ~0.5–1.5s |
+| Wispr Flow | macOS, Windows | Subscription | ~0.5–1s |
+| **Whisper Dictate** | **Windows** | **Free (BYO API keys)** | **~1.0s** |
 
-Honest read: speed is competitive, not dramatically different. The advantage is **free + open-source + Windows-native** + the optional **type mode** that injects characters one-by-one as soon as the LLM responds, so the first character is on screen within a few milliseconds.
+Honest read: speed is competitive, not dramatically different. The advantage is **free + open-source + Windows-native**.
 
 ## Features
 
@@ -41,10 +41,8 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
   - **Raw** — skips the LLM entirely; outputs Whisper's transcript as-is (useful for commands, code, or when you don't want any rewriting)
 
   All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
-- **Two output modes** (right-click tray → Output mode):
-  - **Paste** — clipboard + Ctrl+V. Fast, works almost everywhere, preserves your previous clipboard.
-  - **Type (streaming)** — characters delivered one-by-one via Win32 `SendMessageTimeout(WM_CHAR)` straight to the focused window's message queue, **as Gemini generates them**. Bypasses the OS hardware input queue entirely (no rate limiting, no IME / autorepeat heuristics, no thread-interleaving races). Bypasses keyboard layout — Cyrillic and any Unicode char work regardless of system locale. Works in standard Windows apps (Notepad, Office, IDEs, browsers, Electron). A 4-second per-chunk idle timeout keeps the pipeline from hanging if Gemini holds the stream open past the last chunk.
-- **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, switch output mode, quit. All selections persist to `config.toml` automatically.
+- **Clipboard paste output** — clipboard write + `Ctrl+V` into the focused window. Works anywhere paste does (Notepad, Office, IDEs, browsers, Slack, Discord). The previous clipboard contents are saved and restored automatically. Unicode-safe: Russian text round-trips cleanly through the Windows clipboard regardless of system locale.
+- **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, quit. All selections persist to `config.toml` automatically.
 - **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
 - **Auto-start at login** (optional one-line PowerShell).
 - **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
@@ -103,7 +101,6 @@ hotkey = "ctrl_r"                # any pynput Key name: ctrl_r, ctrl_l, f9, menu
 auto_unmute_mic = true
 min_mic_volume = 0.6
 show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
-output_mode = "paste"            # "paste" (Ctrl+V) or "type" (char-by-char via WM_CHAR)
 polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
 
@@ -125,7 +122,7 @@ Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  POST to Groq Whisper Large v3 Turbo
                  →  if polish_mode == "raw": skip LLM, use the transcript verbatim
                     else: POST transcript + active polish prompt to Gemini 3.1 Flash-Lite
-                 →  paste (clipboard + Ctrl+V) OR type (WM_CHAR per char) into focused window
+                 →  copy polished text to clipboard, send Ctrl+V, restore previous clipboard
 ```
 
 The worker thread that runs STT/LLM/output calls `CoInitialize()` on entry so
@@ -141,20 +138,12 @@ there without crashing the process.
 - **Translate to English** — output is always English, regardless of input language. Whisper still detects the source language for transcription accuracy.
 - **Raw** — bypasses Gemini entirely. Use for proper nouns the LLM keeps mangling, exact quotes, search queries, or anywhere you want zero rewriting.
 
-## Output modes — when to use which
-
-- **Paste** is the default. Faster wall-clock total, works in any app that accepts Ctrl+V. Preserves your previous clipboard.
-- **Type** is better when:
-  - The app rejects synthetic paste (some web inputs, password fields)
-  - You want characters to appear progressively (feels instant)
-  - You're dictating Russian/Cyrillic into a system with a non-Russian default keyboard layout — `WM_CHAR` carries the Unicode code point directly, no keyboard layout translation
-
 ## Troubleshooting
 
-- **Whisper returns "Thank you" instead of my speech.** Your mic is sending silence. "Thank you" is Whisper's hallucination signature for empty audio. Check Windows Sound Settings → Input → test mic level. The app auto-unmutes on startup but a hardware mute switch overrides that.
-- **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The app retries and auto-falls back to the system default mic if your configured WASAPI endpoint fails to open. If failures persist, pick "System default" from the tray.
-- **Only `v` is pasted, not the full text.** The Ctrl modifier didn't register in the target app. The paste chord already has 30ms inter-key gaps to prevent this; if it still happens, switch to **Type** mode.
+- **Whisper returns "Thank you" instead of my speech.** Your mic is sending silence. "Thank you" is Whisper's hallucination signature for empty audio. Check Windows Sound Settings → Input → test mic level. The app auto-unmutes the default mic on startup AND on every PTT press, but a hardware mute switch overrides that.
+- **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The recorder retries and auto-falls back to the system default mic if your configured WASAPI endpoint fails to open. If failures persist, pick "System default" from the tray.
 - **Paste lands in the wrong window.** Focus shifted between key release and the paste. The log records the foreground window title at paste time — search for `paste: sending Ctrl+V into window=...` to confirm.
+- **Paste doesn't work at all in app X.** Some games and a few specialty apps (DRM'd web inputs, password fields, kernel-level anti-cheat) reject synthetic paste. There's no workaround at the Python level — that input layer is below us.
 - **Bluetooth headphones drop to low-fi audio while recording.** Windows switches BT to HFP profile for mic capture, and A2DP restoration is OS-controlled. Use a USB or built-in mic for dictation; the BT headset can keep playing music in A2DP.
 
 ## Tech
@@ -163,11 +152,10 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 
 ## Limitations
 
-- Windows only (uses `winotify`, `pycaw`, Win32 `SendInput` / `SendMessage`, DWM APIs, `comtypes`)
+- Windows only (uses `winotify`, `pycaw`, `comtypes`, DWM APIs)
 - Cloud transcription only — no offline Whisper mode
-- Whisper itself isn't streamed — STT (~400ms) blocks before the LLM can start, even in streaming type mode
 - Single PTT hotkey (no per-mode hotkeys — polish mode is switched via the tray menu)
-- Doesn't work in games that bypass the Windows input message queue (DirectInput / kernel-level input filtering) — no Python-level injection can reach them
+- Paste mode only — apps that reject `Ctrl+V` paste won't accept input from this tool (typing-mode alternatives were too unreliable across Windows / Notepad / Chrome and were removed)
 - Bluetooth HFP profile management is Windows-controlled
 
 ## Crash diagnostics

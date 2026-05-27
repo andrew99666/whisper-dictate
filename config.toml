@@ -26,7 +26,6 @@ min_audio_seconds = 1.0
 
 # Override the LLM polish prompt. Empty string = use the built-in default.
 custom_system_instruction = ""
-output_mode = "type"
 
 # Polish mode — selects which LLM prompt to use. Built-in modes:
 #   "default"      — cleanup + clarity (strip fillers, fix grammar)

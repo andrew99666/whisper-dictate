@@ -2,19 +2,11 @@
 from __future__ import annotations
 
 import os
-import queue
-import threading
-from typing import Iterator
 
 from google import genai
 from google.genai import types
 
 MODEL_ID = "gemini-3.1-flash-lite"
-
-# Streaming safety: if no chunk arrives within this many seconds, stop iterating.
-# Gemini occasionally holds the HTTP stream open well past the final chunk;
-# without this guard the pipeline stays in 'processing' for tens of seconds.
-_STREAM_IDLE_TIMEOUT = 4.0
 
 SYSTEM_INSTRUCTION = """You are a dictation post-processor. You receive a raw speech-to-text transcript and return a cleaned version.
 
@@ -36,21 +28,6 @@ def _get_client() -> genai.Client:
     return _client
 
 
-def _build_user_msg(raw_transcript: str, detected_language: str) -> str:
-    if detected_language:
-        return f"[Detected language: {detected_language}]\n\n{raw_transcript}"
-    return raw_transcript
-
-
-def _gen_config(system_instruction: str) -> types.GenerateContentConfig:
-    instruction = system_instruction.strip() or SYSTEM_INSTRUCTION
-    return types.GenerateContentConfig(
-        system_instruction=instruction,
-        temperature=0.2,
-        max_output_tokens=2048,
-    )
-
-
 def polish(raw_transcript: str, detected_language: str = "", system_instruction: str = "") -> str:
     """Clean up a transcript. detected_language is a hint (e.g. 'English', 'Russian').
 
@@ -59,11 +36,20 @@ def polish(raw_transcript: str, detected_language: str = "", system_instruction:
     if not raw_transcript.strip():
         return ""
 
+    user_msg = raw_transcript
+    if detected_language:
+        user_msg = f"[Detected language: {detected_language}]\n\n{raw_transcript}"
+
+    instruction = system_instruction.strip() or SYSTEM_INSTRUCTION
     client = _get_client()
     resp = client.models.generate_content(
         model=MODEL_ID,
-        contents=_build_user_msg(raw_transcript, detected_language),
-        config=_gen_config(system_instruction),
+        contents=user_msg,
+        config=types.GenerateContentConfig(
+            system_instruction=instruction,
+            temperature=0.2,
+            max_output_tokens=2048,
+        ),
     )
     text = (resp.text or "").strip()
     # Fallback: lite models occasionally return empty for trivial inputs ("okay", "yes").
@@ -71,53 +57,3 @@ def polish(raw_transcript: str, detected_language: str = "", system_instruction:
     if not text:
         return raw_transcript.strip()
     return text
-
-
-def polish_stream(raw_transcript: str, detected_language: str = "",
-                  system_instruction: str = "") -> Iterator[str]:
-    """Stream the polished text from Gemini, yielding chunks as they arrive.
-
-    Includes a per-chunk idle timeout: if no chunk arrives for _STREAM_IDLE_TIMEOUT
-    seconds, this generator stops yielding. The underlying producer thread keeps
-    running as a daemon and exits when the process does. This guards against
-    Gemini occasionally keeping the HTTP stream open well past the final chunk.
-
-    Yields nothing if the input is empty / whitespace-only.
-    """
-    if not raw_transcript.strip():
-        return
-
-    client = _get_client()
-    user_msg = _build_user_msg(raw_transcript, detected_language)
-    config = _gen_config(system_instruction)
-
-    q: "queue.Queue[object]" = queue.Queue()
-    _SENTINEL = object()
-    _ERROR = "__error__"
-
-    def _producer() -> None:
-        try:
-            for chunk in client.models.generate_content_stream(
-                model=MODEL_ID, contents=user_msg, config=config,
-            ):
-                text = chunk.text or ""
-                if text:
-                    q.put(text)
-        except Exception as e:
-            q.put((_ERROR, e))
-        finally:
-            q.put(_SENTINEL)
-
-    threading.Thread(target=_producer, daemon=True, name="gemini-stream").start()
-
-    while True:
-        try:
-            item = q.get(timeout=_STREAM_IDLE_TIMEOUT)
-        except queue.Empty:
-            # No chunk in too long — give up. Producer keeps running as daemon.
-            return
-        if item is _SENTINEL:
-            return
-        if isinstance(item, tuple) and len(item) == 2 and item[0] == _ERROR:
-            raise item[1]
-        yield item  # type: ignore[misc]
