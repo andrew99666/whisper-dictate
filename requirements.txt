@@ -11,5 +11,7 @@ pystray>=0.19.5
 pillow>=10.0.0
 winotify>=1.1.0
 python-dotenv>=1.0.0
-# pycaw removed — was the source of recurring comtypes/COM GC crashes.
-# Silent-mic detection in main.py now provides the same UX safety net via toast.
+# pycaw + comtypes are isolated to a dedicated daemon thread in mic_control.py
+# (they crash hard when COM objects get GC'd across threads).
+pycaw>=20240210
+comtypes>=1.4.0

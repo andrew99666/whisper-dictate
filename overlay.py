@@ -48,10 +48,12 @@ _TEXT_COLOR = QColor(242, 242, 247)
 
 _DOT_REC = (255, 69, 58)     # systemRed (Dark Mode)
 _DOT_PROC = (255, 159, 10)   # systemOrange (Dark Mode)
+_DOT_MUTED = (255, 69, 58)   # systemRed — same as recording but solid (no pulse)
 
 _LABELS = {
     "recording":  "Recording",
     "processing": "Processing",
+    "muted":      "Mic muted",
 }
 
 
@@ -94,8 +96,15 @@ class _PillWidget(QWidget):
 
         # Dot
         if self._state in _LABELS:
-            r, g, b = _DOT_REC if self._state == "recording" else _DOT_PROC
-            alpha = self._pulse if self._state == "recording" else 1.0
+            if self._state == "muted":
+                r, g, b = _DOT_MUTED
+                alpha = 1.0
+            elif self._state == "recording":
+                r, g, b = _DOT_REC
+                alpha = self._pulse  # pulse while recording
+            else:  # processing
+                r, g, b = _DOT_PROC
+                alpha = 1.0
             dot = QColor(r, g, b, int(255 * alpha))
             p.setBrush(QBrush(dot))
             p.setPen(Qt.NoPen)

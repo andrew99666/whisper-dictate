@@ -26,6 +26,7 @@ from llm import polish
 from paste import paste_text
 from tray import Tray
 from feedback import setup_logging, toast
+from mic_control import get_mic_control
 from overlay import Overlay
 
 CFG = cfg_mod.load()
@@ -189,6 +190,20 @@ def _on_press(key):
         if _recording:
             return
         _recording = True
+    # Pre-flight mic check: if muted, try to unmute. If we still can't unmute
+    # (hardware mute switch, no permission, mic_control failed to init), show
+    # the "muted" overlay state and skip recording — otherwise we'd waste
+    # an API call producing Whisper's "Thank you" hallucination.
+    mc = get_mic_control()
+    if mc.is_muted() is True:
+        ok, msg = mc.ensure_unmuted(0.6)
+        logger.info("mic unmute on press: ok=%s %s", ok, msg)
+        if not ok:
+            logger.warning("mic is muted and cannot be unmuted — skipping recording")
+            with _recording_lock:
+                _recording = False
+            _set_state("muted")
+            return
     logger.info("record start")
     _set_state("recording")
     try:

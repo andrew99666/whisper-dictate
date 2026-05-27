@@ -43,7 +43,8 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
   All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
 - **Clipboard paste output** — clipboard write + `Ctrl+V` into the focused window. Works anywhere paste does (Notepad, Office, IDEs, browsers, Slack, Discord). The previous clipboard contents are saved and restored automatically. Unicode-safe: Russian text round-trips cleanly through the Windows clipboard regardless of system locale.
 - **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, quit. All selections persist to `config.toml` automatically.
-- **Silent-mic detection** — if your mic captures essentially nothing (peak below ~0.005), the pipeline is skipped and a toast tells you the mic might be muted/unselected. Stops the "Whisper hallucinates 'thank you'" failure mode from quietly pasting gibberish into your window.
+- **Pre-flight mic mute check + auto-unmute** — every PTT press first checks whether the default mic is muted (~0.2ms call into a thread-isolated `pycaw` worker). If muted, it unmutes; if it *can't* be unmuted (hardware mute switch / no permission), the overlay shows a solid red **"Mic muted"** pill instead of "Recording" and the recording is skipped entirely. No more silently dictating into a muted mic and getting Whisper's "Thank you" hallucination pasted into your window.
+- **Silent-mic guard** (final safety net) — if recording somehow still captures essentially silence (peak < 0.005), the pipeline short-circuits before the API call and toasts a warning instead of pasting hallucinated text.
 - **Auto-start at login** (optional one-line PowerShell).
 - **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
 
@@ -123,9 +124,16 @@ Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  copy polished text to clipboard, send Ctrl+V, restore previous clipboard
 ```
 
-If the captured audio peak is below ~0.005 (essentially silence), the pipeline is
-short-circuited before the API calls and a toast notifies the user — so a muted
-mic doesn't result in pasting Whisper's "Thank you" hallucination into the window.
+Mic safety is two-layered:
+1. **Pre-flight check** on every PTT press: `mic_control` (a dedicated daemon
+   thread that owns pycaw COM objects forever, so they're never GC'd across
+   threads — that race used to crash the app) reports mute state in ~0.2ms.
+   If muted, we try to unmute. If unmute fails or the mic is still muted
+   (hardware switch), the overlay flips to **"Mic muted"** and recording is
+   skipped.
+2. **Post-record fallback**: if the buffer is still essentially silent
+   (peak < 0.005) after recording, the pipeline short-circuits and toasts —
+   catches edge cases like a wrong default device.
 
 ## Polish modes — when to use which
 
@@ -138,7 +146,8 @@ mic doesn't result in pasting Whisper's "Thank you" hallucination into the windo
 
 ## Troubleshooting
 
-- **Toast says "Mic captured silence".** Your mic is muted, disconnected, or sending zero signal. Open Windows Sound Settings → Input → click your mic → make sure it's not muted, the level slider is up, and "Test your microphone" reacts when you speak. Then dictate again.
+- **Overlay shows "Mic muted" when I press the hotkey.** The pre-flight check detected the default mic is muted at the OS level AND auto-unmute couldn't fix it (usually a hardware mute switch on the mic itself, or a different mic being the default than the one you're trying to use). Check the physical mute switch, or pick the right mic from the tray's Input device menu.
+- **Toast says "Mic captured silence".** Audio was captured but came out silent (different from "Mic muted" — this is post-record). Often means the wrong device is the default, or the device opened but isn't getting signal. Check Windows Sound Settings → Input.
 - **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The recorder retries and auto-falls back to the system default mic if your configured WASAPI endpoint fails to open. If failures persist, pick "System default" from the tray.
 - **Paste lands in the wrong window.** Focus shifted between key release and the paste. The log records the foreground window title at paste time — search for `paste: sending Ctrl+V into window=...` to confirm.
 - **Paste doesn't work at all in app X.** Some games and a few specialty apps (DRM'd web inputs, password fields, kernel-level anti-cheat) reject synthetic paste. There's no workaround at the Python level — that input layer is below us.
@@ -146,7 +155,7 @@ mic doesn't result in pasting Whisper's "Thank you" hallucination into the windo
 
 ## Tech
 
-Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating overlay · [sounddevice](https://python-sounddevice.readthedocs.io) + [soundfile](https://python-soundfile.readthedocs.io) + [scipy](https://scipy.org) for capture, resample, and FLAC encode · [pynput](https://pynput.readthedocs.io) for the global hotkey · [pystray](https://github.com/moses-palmer/pystray) for the system tray · [pyperclip](https://pyperclip.readthedocs.io) for the clipboard · [groq](https://github.com/groq/groq-python) + [google-genai](https://github.com/googleapis/python-genai) for the model APIs
+Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating overlay · [sounddevice](https://python-sounddevice.readthedocs.io) + [soundfile](https://python-soundfile.readthedocs.io) + [scipy](https://scipy.org) for capture, resample, and FLAC encode · [pynput](https://pynput.readthedocs.io) for the global hotkey · [pystray](https://github.com/moses-palmer/pystray) for the system tray · [pyperclip](https://pyperclip.readthedocs.io) for the clipboard · [pycaw](https://github.com/AndreMiras/pycaw) (in an isolated daemon thread) for mic mute control · [groq](https://github.com/groq/groq-python) + [google-genai](https://github.com/googleapis/python-genai) for the model APIs
 
 ## Limitations
 
