@@ -43,7 +43,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
   All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
 - **Clipboard paste output** — clipboard write + `Ctrl+V` into the focused window. Works anywhere paste does (Notepad, Office, IDEs, browsers, Slack, Discord). The previous clipboard contents are saved and restored automatically. Unicode-safe: Russian text round-trips cleanly through the Windows clipboard regardless of system locale.
 - **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, quit. All selections persist to `config.toml` automatically.
-- **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
+- **Silent-mic detection** — if your mic captures essentially nothing (peak below ~0.005), the pipeline is skipped and a toast tells you the mic might be muted/unselected. Stops the "Whisper hallucinates 'thank you'" failure mode from quietly pasting gibberish into your window.
 - **Auto-start at login** (optional one-line PowerShell).
 - **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
 
@@ -98,8 +98,6 @@ All keys in `config.toml` are optional; defaults apply when absent.
 ```toml
 hotkey = "ctrl_r"                # any pynput Key name: ctrl_r, ctrl_l, f9, menu, ...
 # mic_device = 1                 # tray menu also sets this; leave blank for system default
-auto_unmute_mic = true
-min_mic_volume = 0.6
 show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
 polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
@@ -125,9 +123,9 @@ Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  copy polished text to clipboard, send Ctrl+V, restore previous clipboard
 ```
 
-The worker thread that runs STT/LLM/output calls `CoInitialize()` on entry so
-pycaw's COM objects (from the mic-unmute call) can be safely garbage-collected
-there without crashing the process.
+If the captured audio peak is below ~0.005 (essentially silence), the pipeline is
+short-circuited before the API calls and a toast notifies the user — so a muted
+mic doesn't result in pasting Whisper's "Thank you" hallucination into the window.
 
 ## Polish modes — when to use which
 
@@ -140,7 +138,7 @@ there without crashing the process.
 
 ## Troubleshooting
 
-- **Whisper returns "Thank you" instead of my speech.** Your mic is sending silence. "Thank you" is Whisper's hallucination signature for empty audio. Check Windows Sound Settings → Input → test mic level. The app auto-unmutes the default mic on startup AND on every PTT press, but a hardware mute switch overrides that.
+- **Toast says "Mic captured silence".** Your mic is muted, disconnected, or sending zero signal. Open Windows Sound Settings → Input → click your mic → make sure it's not muted, the level slider is up, and "Test your microphone" reacts when you speak. Then dictate again.
 - **Nothing happens when I press the hotkey.** Check `whisper-dictate.log` for `PortAudioError`. The recorder retries and auto-falls back to the system default mic if your configured WASAPI endpoint fails to open. If failures persist, pick "System default" from the tray.
 - **Paste lands in the wrong window.** Focus shifted between key release and the paste. The log records the foreground window title at paste time — search for `paste: sending Ctrl+V into window=...` to confirm.
 - **Paste doesn't work at all in app X.** Some games and a few specialty apps (DRM'd web inputs, password fields, kernel-level anti-cheat) reject synthetic paste. There's no workaround at the Python level — that input layer is below us.
@@ -148,11 +146,11 @@ there without crashing the process.
 
 ## Tech
 
-Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating overlay · [sounddevice](https://python-sounddevice.readthedocs.io) + [soundfile](https://python-soundfile.readthedocs.io) + [scipy](https://scipy.org) for capture, resample, and FLAC encode · [pynput](https://pynput.readthedocs.io) for the global hotkey · [pystray](https://github.com/moses-palmer/pystray) for the system tray · [pyperclip](https://pyperclip.readthedocs.io) for the clipboard · [pycaw](https://github.com/AndreMiras/pycaw) for mic mute control · [groq](https://github.com/groq/groq-python) + [google-genai](https://github.com/googleapis/python-genai) for the model APIs
+Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating overlay · [sounddevice](https://python-sounddevice.readthedocs.io) + [soundfile](https://python-soundfile.readthedocs.io) + [scipy](https://scipy.org) for capture, resample, and FLAC encode · [pynput](https://pynput.readthedocs.io) for the global hotkey · [pystray](https://github.com/moses-palmer/pystray) for the system tray · [pyperclip](https://pyperclip.readthedocs.io) for the clipboard · [groq](https://github.com/groq/groq-python) + [google-genai](https://github.com/googleapis/python-genai) for the model APIs
 
 ## Limitations
 
-- Windows only (uses `winotify`, `pycaw`, `comtypes`, DWM APIs)
+- Windows only (uses `winotify`, DWM APIs, Win32 via `ctypes`)
 - Cloud transcription only — no offline Whisper mode
 - Single PTT hotkey (no per-mode hotkeys — polish mode is switched via the tray menu)
 - Paste mode only — apps that reject `Ctrl+V` paste won't accept input from this tool (typing-mode alternatives were too unreliable across Windows / Notepad / Chrome and were removed)

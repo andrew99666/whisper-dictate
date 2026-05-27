@@ -6,14 +6,11 @@ Hold the configured hotkey (default: Right Ctrl) to record. Release to transcrib
 from __future__ import annotations
 
 import faulthandler
-import logging
 import os
 import re
 import sys
 import threading
 import traceback
-
-import comtypes  # for CoInitialize in worker threads (pycaw COM finalizer safety)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -29,7 +26,6 @@ from llm import polish
 from paste import paste_text
 from tray import Tray
 from feedback import setup_logging, toast
-from mic_control import unmute_default_mic
 from overlay import Overlay
 
 CFG = cfg_mod.load()
@@ -113,19 +109,28 @@ def _set_state(state: str) -> None:
 
 def _process(audio, rate: int) -> None:
     """STT -> polish -> paste. Runs in a worker thread."""
-    # pycaw (our mic-unmute) creates COM objects on the listener thread. Python's
-    # GC may finalize them in this worker thread when it runs (e.g. during a lazy
-    # import inside Groq's client). Without CoInitialize, comtypes IUnknown.Release()
-    # crashes with an access violation. Initializing COM here makes finalizers safe.
-    try:
-        comtypes.CoInitialize()
-    except Exception:
-        pass
     if not _processing_lock.acquire(blocking=False):
         logger.info("dropped utterance: previous pipeline still running")
+        # The previous pipeline is still going — reflect that in the overlay
+        # so it doesn't stay stuck on "recording" (set by on_press).
+        _set_state("processing")
         return
     try:
         _set_state("processing")
+        # Silent-audio guard: if the recorded buffer is essentially silent, skip
+        # the API call. Otherwise Whisper hallucinates "Thank you" / "Bye" and we
+        # paste that gibberish into the user's window. Cause is usually a muted
+        # mic, a stale Bluetooth profile, or the callback API failing for the device.
+        if audio.size > 0:
+            import numpy as _np
+            peak = float(_np.max(_np.abs(audio)))
+            if peak < 0.005:
+                logger.warning("silent audio (peak=%.5f, dur=%.2fs) — skipping pipeline",
+                               peak, audio.size / rate)
+                if CFG.enable_toasts:
+                    toast("Whisper Dictate",
+                          "Mic captured silence — check that it's unmuted and selected")
+                return
         padded = pad_to_min_duration(audio, rate, min_seconds=CFG.min_audio_seconds)
         try:
             txn = transcribe(padded, rate)
@@ -186,14 +191,6 @@ def _on_press(key):
         _recording = True
     logger.info("record start")
     _set_state("recording")
-    # Re-unmute on every press. Windows can re-mute the default mic across sleep,
-    # device re-enumeration, or other apps' policies; auto_unmute_mic at startup
-    # alone isn't enough for a long-running app.
-    if CFG.auto_unmute_mic:
-        try:
-            unmute_default_mic(min_volume=CFG.min_mic_volume)
-        except Exception:
-            pass
     try:
         _recorder.start()
     except Exception as e:
@@ -298,10 +295,6 @@ def main() -> int:
             print(f"error: {msg}", file=sys.stderr)
             logger.error(msg)
             return 1
-
-    if CFG.auto_unmute_mic:
-        ok, msg = unmute_default_mic(min_volume=CFG.min_mic_volume)
-        logger.info("mic unmute: ok=%s %s", ok, msg)
 
     # Qt event loop MUST run on the main thread on Windows. Create the QApplication
     # here and run app.exec() at the end. The tray (pystray) moves to a worker thread.

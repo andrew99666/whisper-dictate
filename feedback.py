@@ -1,15 +1,8 @@
-"""User-facing feedback: beeps, toasts, logger setup."""
+"""Logger setup + Windows toast notifications."""
 from __future__ import annotations
 
 import logging
-import threading
 from logging.handlers import RotatingFileHandler
-
-try:
-    import winsound  # Windows-only stdlib module
-    _HAVE_WINSOUND = True
-except ImportError:
-    _HAVE_WINSOUND = False
 
 from winotify import Notification
 
@@ -24,21 +17,6 @@ def setup_logging(log_path: str) -> logging.Logger:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         _logger.addHandler(handler)
     return _logger
-
-
-def beep(freq: int, dur_ms: int) -> None:
-    """Non-blocking beep. Silent if not on Windows."""
-    if not _HAVE_WINSOUND:
-        return
-    threading.Thread(target=winsound.Beep, args=(freq, dur_ms), daemon=True).start()
-
-
-def beep_start() -> None:
-    beep(880, 60)
-
-
-def beep_stop() -> None:
-    beep(660, 60)
 
 
 def toast(title: str, body: str) -> None:

@@ -7,14 +7,6 @@ hotkey = "ctrl_r"
 # Run this to list devices: python -c "import sounddevice; print(sounddevice.query_devices())"
 mic_device = 23
 
-# Auto-unmute the default input device on app start (and raise its volume if low).
-# Prevents the "Whisper hallucinates 'thank you'" failure mode when the mic is muted at the OS level.
-auto_unmute_mic = true
-min_mic_volume = 0.6
-
-# Subtle beeps when recording starts/stops.
-enable_beeps = true
-
 # Windows toast notifications on API errors.
 enable_toasts = true
 
@@ -23,9 +15,6 @@ log_path = "whisper-dictate.log"
 
 # Pad recordings shorter than this with trailing silence (Groq's segment minimum).
 min_audio_seconds = 1.0
-
-# Override the LLM polish prompt. Empty string = use the built-in default.
-custom_system_instruction = ""
 
 # Polish mode — selects which LLM prompt to use. Built-in modes:
 #   "default"      — cleanup + clarity (strip fillers, fix grammar)

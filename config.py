@@ -102,13 +102,9 @@ POLISH_MODE_LABELS: dict[str, str] = {
 class Config:
     hotkey: str = "ctrl_r"                 # pynput Key name (e.g. "ctrl_r", "f9", "menu")
     mic_device: int | None = None          # None = default device
-    enable_beeps: bool = True              # legacy; the overlay replaces beeps
     enable_toasts: bool = True
     log_path: str = "whisper-dictate.log"
-    custom_system_instruction: str = ""    # legacy; superseded by polish_modes
     min_audio_seconds: float = 1.0
-    auto_unmute_mic: bool = True
-    min_mic_volume: float = 0.6
     show_all_backends: bool = False
     polish_mode: str = "default"           # active mode; "raw" skips LLM entirely
     polish_modes: dict[str, str] = field(default_factory=dict)  # populated from defaults + config.toml
