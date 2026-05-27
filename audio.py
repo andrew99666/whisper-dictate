@@ -1,12 +1,14 @@
 """Microphone capture for push-to-talk dictation.
 
-Uses sd.rec() (blocking-API path), not sd.InputStream(callback=...). On Windows,
-some devices — particularly Bluetooth HFP headsets — only deliver audio data
-through the blocking path; the callback API silently produces zero frames.
+Uses sd.InputStream with a callback that appends chunks to a list. Memory
+grows linearly with the actual recording duration (no pre-allocation cap),
+so dictations of arbitrary length work — 1s ≈ 200KB, 1 hour ≈ 700MB at
+48kHz mono float32.
 """
 from __future__ import annotations
 
 import io
+import threading
 import time
 import wave
 from math import gcd
@@ -18,7 +20,6 @@ from scipy import signal
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "float32"
-MAX_RECORD_SECONDS = 120  # generous PTT ceiling; trimmed on stop()
 
 
 def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -33,19 +34,18 @@ def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarra
 
 
 class Recorder:
-    """Pre-allocates a buffer and uses sd.rec() to fill it; stop() trims to actual duration.
+    """Callback-driven InputStream; chunks accumulate in a list, concatenated on stop().
 
-    Records at the device's native sample rate (WASAPI refuses non-native rates).
-    Whisper accepts any rate, so we pass the actual rate through to the encoder.
+    No pre-allocated buffer, no duration cap. Records at the device's native sample
+    rate (WASAPI refuses non-native rates); the caller resamples downstream.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | None = None,
-                 max_seconds: int = MAX_RECORD_SECONDS):
+    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | None = None):
         self.requested_sample_rate = sample_rate
         self.device = device
-        self.max_seconds = max_seconds
-        self._buffer: np.ndarray | None = None
-        self._start_time: float | None = None
+        self._stream: sd.InputStream | None = None
+        self._chunks: list[np.ndarray] = []
+        self._chunks_lock = threading.Lock()
         self._actual_rate: int = sample_rate
 
     def _rate_for_device(self, device: int | None) -> int:
@@ -59,13 +59,25 @@ class Recorder:
         except Exception:
             return self.requested_sample_rate
 
-    def start(self) -> None:
-        """Open the configured device; on persistent failure, fall back to the system default.
+    def _on_audio(self, indata, frames, time_info, status) -> None:
+        # PortAudio reuses the buffer between callbacks — copy or it gets overwritten.
+        # NEVER let an exception escape into PortAudio's C callback — that's a
+        # likely segfault source. Swallow everything.
+        try:
+            with self._chunks_lock:
+                self._chunks.append(indata.copy())
+        except Exception:
+            pass
 
-        WASAPI can fail with WDM-KS pin errors (GLE 0x490) when other audio activity
-        in the process poisons the format negotiation. Falling back to the system
-        default (MME) is more forgiving — Windows Audio Engine handles format conversion.
+    def start(self) -> None:
+        """Open an InputStream on the configured device; fall back to default on failure.
+
+        WASAPI can intermittently fail with WDM-KS pin errors (GLE 0x490). Falling
+        back to the system default (typically MME) is more forgiving.
         """
+        with self._chunks_lock:
+            self._chunks.clear()
+
         candidates: list[tuple[int | None, int]] = [
             (self.device, self._rate_for_device(self.device)),
         ]
@@ -76,37 +88,55 @@ class Recorder:
         for dev, rate in candidates:
             for attempt in range(2):
                 try:
-                    self._buffer = sd.rec(
-                        int(self.max_seconds * rate),
+                    self._stream = sd.InputStream(
                         samplerate=rate,
                         channels=CHANNELS,
                         dtype=DTYPE,
                         device=dev,
+                        callback=self._on_audio,
                     )
+                    self._stream.start()
                     self._actual_rate = rate
-                    self._start_time = time.monotonic()
                     return
                 except Exception as e:
                     last_err = e
-                    try:
-                        sd.stop()
-                    except Exception:
-                        pass
+                    if self._stream is not None:
+                        try:
+                            self._stream.close()
+                        except Exception:
+                            pass
+                        self._stream = None
                     time.sleep(0.15)
         assert last_err is not None
         raise last_err
 
     def stop(self) -> tuple[np.ndarray, int]:
-        """Returns (audio, sample_rate). Caller uses the returned rate downstream."""
-        if self._buffer is None or self._start_time is None:
-            return np.zeros(0, dtype=np.float32), self.requested_sample_rate
-        elapsed = time.monotonic() - self._start_time
-        sd.stop()
-        frames = min(int(elapsed * self._actual_rate), self._buffer.shape[0])
-        audio = self._buffer[:frames].flatten().copy()
+        """Returns (audio, sample_rate). Caller uses the returned rate downstream.
+
+        Closes the stream defensively: stop() then a short drain delay before
+        close(). PortAudio's Windows backend can crash if close() races with an
+        in-flight callback; the delay gives any pending callback time to return.
+        """
         rate = self._actual_rate
-        self._buffer = None
-        self._start_time = None
+        stream = self._stream
+        self._stream = None  # detach first so the callback is harmless if it fires
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            # Give the PortAudio callback thread time to fully drain before close().
+            time.sleep(0.05)
+            try:
+                stream.close()
+            except Exception:
+                pass
+        with self._chunks_lock:
+            chunks = self._chunks
+            self._chunks = []
+        if not chunks:
+            return np.zeros(0, dtype=np.float32), rate
+        audio = np.concatenate(chunks, axis=0).flatten()
         return audio, rate
 
 

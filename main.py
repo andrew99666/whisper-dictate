@@ -5,11 +5,15 @@ Hold the configured hotkey (default: Right Ctrl) to record. Release to transcrib
 """
 from __future__ import annotations
 
+import faulthandler
+import logging
 import os
 import re
 import sys
 import threading
 import traceback
+
+import comtypes  # for CoInitialize in worker threads (pycaw COM finalizer safety)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -38,6 +42,47 @@ if not os.path.isabs(_log_path):
 logger = setup_logging(_log_path)
 
 
+# ---- crash diagnostics ----------------------------------------------------
+# pythonw.exe silently discards stderr. Without these hooks an unhandled
+# exception in any worker thread, or a segfault in PortAudio / Qt / ctypes,
+# just kills the process with no trace anywhere.
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_stderr_log_path = os.path.join(_SCRIPT_DIR, "stderr.log")
+_fault_log_path = os.path.join(_SCRIPT_DIR, "fault.log")
+
+# Redirect Python's sys.stderr to a file so tracebacks that bypass our logger
+# still land somewhere readable.
+try:
+    sys.stderr = open(_stderr_log_path, "a", buffering=1, encoding="utf-8")
+except Exception:
+    pass
+
+# faulthandler dumps native C-level stack traces on SIGSEGV, abort, etc.
+# Held open for the process lifetime.
+try:
+    _fault_file = open(_fault_log_path, "a", buffering=1, encoding="utf-8")
+    faulthandler.enable(file=_fault_file, all_threads=True)
+except Exception:
+    pass
+
+
+def _log_main_excepthook(exc_type, exc_value, exc_tb):
+    logger.error("unhandled exception (main thread):",
+                 exc_info=(exc_type, exc_value, exc_tb))
+
+
+def _log_thread_excepthook(args):
+    # args is a threading.ExceptHookArgs namedtuple
+    logger.error("unhandled exception (thread=%s):",
+                 getattr(args.thread, "name", "?"),
+                 exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+
+sys.excepthook = _log_main_excepthook
+threading.excepthook = _log_thread_excepthook
+
+
 def _parse_hotkey(name: str):
     """Map a config string like 'ctrl_r' to a pynput Key."""
     if hasattr(keyboard.Key, name):
@@ -52,15 +97,11 @@ PTT_KEY = _parse_hotkey(CFG.hotkey)
 _recorder = Recorder(device=CFG.mic_device)
 _recording = False
 _recording_lock = threading.Lock()  # protects _recording transitions
-_watchdog: threading.Timer | None = None
 _processing_lock = threading.Lock()
 _tray: Tray | None = None
 _overlay: Overlay | None = None
 _listener: keyboard.Listener | None = None
 _qt_app: QApplication | None = None
-
-# Safety cap: if we somehow miss a key release, force-stop after this long.
-MAX_RECORDING_SECONDS = 60
 
 
 def _set_state(state: str) -> None:
@@ -72,6 +113,14 @@ def _set_state(state: str) -> None:
 
 def _process(audio, rate: int) -> None:
     """STT -> polish -> paste. Runs in a worker thread."""
+    # pycaw (our mic-unmute) creates COM objects on the listener thread. Python's
+    # GC may finalize them in this worker thread when it runs (e.g. during a lazy
+    # import inside Groq's client). Without CoInitialize, comtypes IUnknown.Release()
+    # crashes with an access violation. Initializing COM here makes finalizers safe.
+    try:
+        comtypes.CoInitialize()
+    except Exception:
+        pass
     if not _processing_lock.acquire(blocking=False):
         logger.info("dropped utterance: previous pipeline still running")
         return
@@ -141,29 +190,20 @@ def _process(audio, rate: int) -> None:
 
 
 def _stop_and_process(reason: str) -> None:
-    """Centralized stop path: cancels watchdog, stops recorder, kicks processing."""
-    global _recording, _watchdog
+    """Centralized stop path: stops recorder, kicks processing."""
+    global _recording
     with _recording_lock:
         if not _recording:
             return
         _recording = False
-    if _watchdog is not None:
-        _watchdog.cancel()
-        _watchdog = None
     audio, rate = _recorder.stop()
     dur = audio.size / rate
     logger.info("record stop [%s] (%.2fs @ %dHz)", reason, dur, rate)
     threading.Thread(target=_process, args=(audio, rate), daemon=True).start()
 
 
-def _watchdog_fire() -> None:
-    logger.warning("watchdog fired: forcing stop after %ds (key release likely missed)",
-                   MAX_RECORDING_SECONDS)
-    _stop_and_process(reason="watchdog")
-
-
 def _on_press(key):
-    global _recording, _watchdog
+    global _recording
     if key != PTT_KEY:
         return
     logger.debug("on_press PTT (recording=%s)", _recording)
@@ -173,6 +213,14 @@ def _on_press(key):
         _recording = True
     logger.info("record start")
     _set_state("recording")
+    # Re-unmute on every press. Windows can re-mute the default mic across sleep,
+    # device re-enumeration, or other apps' policies; auto_unmute_mic at startup
+    # alone isn't enough for a long-running app.
+    if CFG.auto_unmute_mic:
+        try:
+            unmute_default_mic(min_volume=CFG.min_mic_volume)
+        except Exception:
+            pass
     try:
         _recorder.start()
     except Exception as e:
@@ -183,9 +231,6 @@ def _on_press(key):
         if CFG.enable_toasts:
             toast("Whisper Dictate — mic error", f"Couldn't open device: {e}"[:200])
         return
-    _watchdog = threading.Timer(MAX_RECORDING_SECONDS, _watchdog_fire)
-    _watchdog.daemon = True
-    _watchdog.start()
 
 
 def _on_release(key):

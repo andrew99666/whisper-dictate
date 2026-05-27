@@ -43,7 +43,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
   All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
 - **Two output modes** (right-click tray → Output mode):
   - **Paste** — clipboard + Ctrl+V. Fast, works almost everywhere, preserves your previous clipboard.
-  - **Type (streaming)** — characters injected one-by-one via Win32 `SendInput` with `KEYEVENTF_UNICODE` **as Gemini generates them** (chunks arrive over the LLM stream and are typed immediately). Bypasses keyboard layout (Cyrillic works regardless of system locale), works in apps that reject paste, and gives the fastest perceived latency — the first words land on screen within a few hundred ms of the LLM responding. A 4-second per-chunk idle timeout keeps the pipeline from hanging if Gemini holds the stream open past the last chunk.
+  - **Type (streaming)** — characters delivered one-by-one via Win32 `SendMessageTimeout(WM_CHAR)` straight to the focused window's message queue, **as Gemini generates them**. Bypasses the OS hardware input queue entirely (no rate limiting, no IME / autorepeat heuristics, no thread-interleaving races). Bypasses keyboard layout — Cyrillic and any Unicode char work regardless of system locale. Works in standard Windows apps (Notepad, Office, IDEs, browsers, Electron). A 4-second per-chunk idle timeout keeps the pipeline from hanging if Gemini holds the stream open past the last chunk.
 - **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, switch output mode, quit. All selections persist to `config.toml` automatically.
 - **Auto-unmute mic on start** — sidesteps the "Whisper hallucinates 'thank you'" failure mode when the mic was muted at the OS level.
 - **Auto-start at login** (optional one-line PowerShell).
@@ -103,7 +103,7 @@ hotkey = "ctrl_r"                # any pynput Key name: ctrl_r, ctrl_l, f9, menu
 auto_unmute_mic = true
 min_mic_volume = 0.6
 show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
-output_mode = "paste"            # "paste" (Ctrl+V) or "type" (char-by-char via SendInput)
+output_mode = "paste"            # "paste" (Ctrl+V) or "type" (char-by-char via WM_CHAR)
 polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
 
@@ -117,14 +117,20 @@ The built-in polish prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MO
 ## How it works
 
 ```
-Right Ctrl down  →  sounddevice.rec() into numpy buffer (native device rate)
-Right Ctrl up    →  stop, trim
+Right Ctrl down  →  re-unmute default mic (in case Windows muted it after sleep)
+                 →  sounddevice.InputStream callback → chunks list (grows as you speak,
+                    no pre-allocated buffer, no recording length cap)
+Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  scipy.signal.resample_poly to 16kHz, encode as FLAC
                  →  POST to Groq Whisper Large v3 Turbo
                  →  if polish_mode == "raw": skip LLM, use the transcript verbatim
                     else: POST transcript + active polish prompt to Gemini 3.1 Flash-Lite
-                 →  paste (clipboard + Ctrl+V) OR type (SendInput Unicode) into focused window
+                 →  paste (clipboard + Ctrl+V) OR type (WM_CHAR per char) into focused window
 ```
+
+The worker thread that runs STT/LLM/output calls `CoInitialize()` on entry so
+pycaw's COM objects (from the mic-unmute call) can be safely garbage-collected
+there without crashing the process.
 
 ## Polish modes — when to use which
 
@@ -141,7 +147,7 @@ Right Ctrl up    →  stop, trim
 - **Type** is better when:
   - The app rejects synthetic paste (some web inputs, password fields)
   - You want characters to appear progressively (feels instant)
-  - You're dictating Russian/Cyrillic into a system with a non-Russian default keyboard layout — `SendInput` with `KEYEVENTF_UNICODE` bypasses the layout and never produces garbled chars
+  - You're dictating Russian/Cyrillic into a system with a non-Russian default keyboard layout — `WM_CHAR` carries the Unicode code point directly, no keyboard layout translation
 
 ## Troubleshooting
 
@@ -157,12 +163,20 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 
 ## Limitations
 
-- Windows only (uses `winsound`, `winotify`, `pycaw`, Win32 SendInput, DWM APIs)
+- Windows only (uses `winotify`, `pycaw`, Win32 `SendInput` / `SendMessage`, DWM APIs, `comtypes`)
 - Cloud transcription only — no offline Whisper mode
 - Whisper itself isn't streamed — STT (~400ms) blocks before the LLM can start, even in streaming type mode
 - Single PTT hotkey (no per-mode hotkeys — polish mode is switched via the tray menu)
 - Doesn't work in games that bypass the Windows input message queue (DirectInput / kernel-level input filtering) — no Python-level injection can reach them
 - Bluetooth HFP profile management is Windows-controlled
+
+## Crash diagnostics
+
+`pythonw.exe` silently discards `stderr`, so unhandled errors normally vanish. The app installs three safety nets so crashes leave a trace next to the project root:
+
+- **`whisper-dictate.log`** — all normal logging + `sys.excepthook` and `threading.excepthook` write any unhandled Python exception (with full stack) here.
+- **`stderr.log`** — `sys.stderr` is redirected to this file so anything that bypasses the logger (e.g. comtypes `Exception ignored in __del__` messages) lands somewhere readable.
+- **`fault.log`** — `faulthandler.enable()` writes native C-level stack traces here on segfaults / access violations (PortAudio, Qt, ctypes). If the process dies hard, this is where the cause shows up.
 
 ## License
 
