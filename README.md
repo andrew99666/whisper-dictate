@@ -30,7 +30,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
 
 - **Push-to-talk hotkey** — hold Right Ctrl (configurable), speak, release.
 - **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio. FLAC upload at 16kHz keeps payload tiny.
-- **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. ~4× faster than 3.5-Flash in our A/B test ([bench_polish.py](bench_polish.py)) with judged quality parity.
+- **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. Sub-second response for typical dictation lengths.
 - **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
 - **Six polish modes** (right-click tray → Polish mode):
   - **Default** — cleanup + clarity rewrite, language-preserving
@@ -54,7 +54,7 @@ Polished dictation tools like Superwhisper and MacWhisper are macOS-only. Wispr 
 
 ## Install
 
-Windows 10/11, Python 3.11+, a [Groq API key](https://console.groq.com/keys), and a [Google AI Studio key for Gemini](https://aistudio.google.com/app/apikey). Both have free tiers usable for personal use (Gemini Flash-Lite's free tier is generous; 3.5-Flash hits 20/day quickly).
+Windows 10/11, Python 3.11+, a [Groq API key](https://console.groq.com/keys), and a [Google AI Studio key for Gemini](https://aistudio.google.com/app/apikey). Both have free tiers usable for personal use.
 
 ```powershell
 git clone https://github.com/andrew99666/whisper-dictate.git
