@@ -31,6 +31,8 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
 - **Push-to-talk hotkey** — hold Right Ctrl (configurable), speak, release.
 - **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio. FLAC upload at 16kHz keeps payload tiny.
 - **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. Sub-second response for typical dictation lengths.
+- **Tone-aware cleanup** — the default, email, chat, and translate modes use a compact personal tone guide: direct, practical, lightly warm, and plain-spoken without preserving typos or rough grammar.
+- **Prompt-safe polishing** — dictated text is treated as inert transcript data, not a command for Gemini to execute. If you dictate "write me a letter...", the app cleans that request instead of generating the letter.
 - **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
 - **Six polish modes** (right-click tray → Polish mode):
   - **Default** — cleanup + clarity rewrite, language-preserving
@@ -111,6 +113,8 @@ disable_gemini_thinking = false  # true is faster; false is safer for polish qua
 
 The built-in polish prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`). To customize, either edit them there or add a `[polish_modes]` table to `config.toml` — user values are merged on top of the defaults. To use a custom mode in the tray, add its key to `POLISH_MODE_LABELS` in `config.py`.
 
+`disable_gemini_thinking = false` keeps polish quality conservative. Set it to `true` only if you want to trade some prompt-following reliability for lower Gemini latency.
+
 ## How it works
 
 ```
@@ -138,7 +142,7 @@ Mic safety is two-layered:
 
 ## Polish modes — when to use which
 
-- **Default** — everyday dictation. Cleans fillers, fixes grammar, lightly rewrites for clarity. Use this most of the time.
+- **Default** — everyday dictation. Cleans fillers, fixes grammar, lightly rewrites for clarity, and keeps the configured personal tone. Use this most of the time.
 - **Email** — when dictating an email body. Preserves greetings ("Hi John") and sign-offs ("Thanks, Andrew") you actually said; does not invent them. Structures into paragraphs naturally.
 - **Chat** — short messages where you want minimal editing. Doesn't pad fragments into full sentences.
 - **Code** — dictating technical content, commands, or speaking code aloud (e.g. `git push origin main` stays verbatim instead of becoming "Git pushes origin to main").
