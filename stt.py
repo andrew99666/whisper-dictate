@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 from groq import Groq
@@ -16,6 +17,9 @@ MODEL_ID = "whisper-large-v3-turbo"
 class Transcription:
     text: str
     language: str  # ISO code Whisper returned, e.g. "en", "ru"
+    encode_ms: float = 0.0
+    request_ms: float = 0.0
+    audio_bytes: int = 0
 
 
 _client: Groq | None = None
@@ -30,17 +34,27 @@ def _get_client() -> Groq:
 
 def transcribe(audio: np.ndarray, sample_rate: int = 16_000) -> Transcription:
     """Send audio buffer to Groq Whisper as FLAC (smaller upload, lossless). Auto-detect language."""
+    t0 = time.perf_counter()
     flac_bytes = to_flac_bytes(audio, sample_rate)
+    encode_ms = (time.perf_counter() - t0) * 1000.0
     client = _get_client()
+    t1 = time.perf_counter()
     resp = client.audio.transcriptions.create(
         file=("audio.flac", flac_bytes, "audio/flac"),
         model=MODEL_ID,
         response_format="verbose_json",  # includes detected language
         temperature=0.0,
     )
+    request_ms = (time.perf_counter() - t1) * 1000.0
     text = (getattr(resp, "text", "") or "").strip()
     language = getattr(resp, "language", "") or ""
-    return Transcription(text=text, language=language)
+    return Transcription(
+        text=text,
+        language=language,
+        encode_ms=encode_ms,
+        request_ms=request_ms,
+        audio_bytes=len(flac_bytes),
+    )
 
 
 def transcribe_wav_file(path: str) -> Transcription:

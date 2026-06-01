@@ -16,6 +16,10 @@ log_path = "whisper-dictate.log"
 # Pad recordings shorter than this with trailing silence (Groq's segment minimum).
 min_audio_seconds = 1.0
 
+# Lower-latency Gemini polish when the selected model supports disabling thinking.
+# Keep this off for higher-quality default polish.
+disable_gemini_thinking = false
+
 # Polish mode — selects which LLM prompt to use. Built-in modes:
 #   "default"      — cleanup + clarity (strip fillers, fix grammar)
 #   "email"        — formal-ish, paragraphs, suitable for an email body

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import threading
 import time
 import pyperclip
 from pynput.keyboard import Controller, Key, KeyCode
@@ -74,5 +75,9 @@ def paste_text(text: str, restore_delay: float = 0.2, send_keys: bool = True) ->
         _logger.info("paste: sending Ctrl+V into window=%r", win_title[:80])
         _send_paste_chord()
         _logger.debug("paste: Ctrl+V sent")
-    time.sleep(restore_delay)
-    _safe_set_clipboard(prev)
+    if restore_delay <= 0:
+        _safe_set_clipboard(prev)
+        return
+    restore = threading.Timer(restore_delay, _safe_set_clipboard, args=(prev,))
+    restore.daemon = True
+    restore.start()

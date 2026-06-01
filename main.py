@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 
 from dotenv import load_dotenv
@@ -108,7 +109,11 @@ def _set_state(state: str) -> None:
         _overlay.set_state(state)
 
 
-def _process(audio, rate: int) -> None:
+def _timing_summary(timings: dict[str, float]) -> str:
+    return " ".join(f"{name}={value:.0f}ms" for name, value in timings.items())
+
+
+def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
     """STT -> polish -> paste. Runs in a worker thread."""
     if not _processing_lock.acquire(blocking=False):
         logger.info("dropped utterance: previous pipeline still running")
@@ -116,6 +121,10 @@ def _process(audio, rate: int) -> None:
         # so it doesn't stay stuck on "recording" (set by on_press).
         _set_state("processing")
         return
+    timings: dict[str, float] = {}
+    if stop_ms:
+        timings["stop"] = stop_ms
+    pipeline_t0 = time.perf_counter()
     try:
         _set_state("processing")
         # Silent-audio guard: if the recorded buffer is essentially silent, skip
@@ -124,7 +133,9 @@ def _process(audio, rate: int) -> None:
         # mic, a stale Bluetooth profile, or the callback API failing for the device.
         if audio.size > 0:
             import numpy as _np
+            t0 = time.perf_counter()
             peak = float(_np.max(_np.abs(audio)))
+            timings["silence_check"] = (time.perf_counter() - t0) * 1000.0
             if peak < 0.005:
                 logger.warning("silent audio (peak=%.5f, dur=%.2fs) — skipping pipeline",
                                peak, audio.size / rate)
@@ -132,38 +143,54 @@ def _process(audio, rate: int) -> None:
                     toast("Whisper Dictate",
                           "Mic captured silence — check that it's unmuted and selected")
                 return
+        t0 = time.perf_counter()
         padded = pad_to_min_duration(audio, rate, min_seconds=CFG.min_audio_seconds)
+        timings["pad"] = (time.perf_counter() - t0) * 1000.0
         try:
+            t0 = time.perf_counter()
             txn = transcribe(padded, rate)
+            timings["stt_total"] = (time.perf_counter() - t0) * 1000.0
+            timings["stt_encode"] = txn.encode_ms
+            timings["stt_request"] = txn.request_ms
         except Exception as e:
             logger.exception("STT failed")
             if CFG.enable_toasts:
                 toast("Whisper Dictate — STT error", str(e)[:200])
             return
-        logger.info("stt lang=%r text=%r", txn.language, txn.text)
+        logger.info("stt lang=%r bytes=%d text=%r", txn.language, txn.audio_bytes, txn.text)
         if not txn.text.strip():
             return
 
         # Raw mode: skip the LLM entirely; paste the Whisper transcript as-is.
         if CFG.polish_mode == "raw":
             logger.info("raw mode: skipping LLM")
+            t0 = time.perf_counter()
             paste_text(txn.text)
+            timings["paste"] = (time.perf_counter() - t0) * 1000.0
         else:
             instruction = CFG.polish_modes.get(CFG.polish_mode, "")
+            t0 = time.perf_counter()
             try:
-                polished = polish(txn.text, txn.language, instruction)
+                thinking_budget = 0 if CFG.disable_gemini_thinking else None
+                polished = polish(txn.text, txn.language, instruction, thinking_budget)
             except Exception as e:
                 logger.exception("LLM polish failed")
                 if CFG.enable_toasts:
                     toast("Whisper Dictate — LLM error", str(e)[:200])
                 polished = txn.text  # fall back to raw transcript
+            finally:
+                timings["polish"] = (time.perf_counter() - t0) * 1000.0
             logger.info("polished (mode=%s)=%r", CFG.polish_mode, polished)
             if polished:
+                t0 = time.perf_counter()
                 paste_text(polished)
+                timings["paste"] = (time.perf_counter() - t0) * 1000.0
     except Exception:
         logger.exception("pipeline crashed")
         traceback.print_exc()
     finally:
+        timings["total"] = stop_ms + (time.perf_counter() - pipeline_t0) * 1000.0
+        logger.info("pipeline timing: %s", _timing_summary(timings))
         _set_state("idle")
         _processing_lock.release()
 
@@ -175,10 +202,12 @@ def _stop_and_process(reason: str) -> None:
         if not _recording:
             return
         _recording = False
+    t0 = time.perf_counter()
     audio, rate = _recorder.stop()
+    stop_ms = (time.perf_counter() - t0) * 1000.0
     dur = audio.size / rate
-    logger.info("record stop [%s] (%.2fs @ %dHz)", reason, dur, rate)
-    threading.Thread(target=_process, args=(audio, rate), daemon=True).start()
+    logger.info("record stop [%s] (%.2fs @ %dHz, stop=%.0fms)", reason, dur, rate, stop_ms)
+    threading.Thread(target=_process, args=(audio, rate, stop_ms), daemon=True).start()
 
 
 def _on_press(key):

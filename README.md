@@ -102,6 +102,7 @@ hotkey = "ctrl_r"                # any pynput Key name: ctrl_r, ctrl_l, f9, menu
 show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS endpoints
 polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
+disable_gemini_thinking = false  # true is faster; false is safer for polish quality
 
 # Optional: override built-in polish prompts or add your own modes.
 # [polish_modes]
