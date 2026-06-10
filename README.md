@@ -43,7 +43,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
   - **Raw** — skips the LLM entirely; outputs Whisper's transcript as-is (useful for commands, code, or when you don't want any rewriting)
 
   All prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`); override any of them or add your own modes via a `[polish_modes]` table in `config.toml`.
-- **Clipboard paste output** — clipboard write + `Ctrl+V` into the focused window. Works anywhere paste does (Notepad, Office, IDEs, browsers, Slack, Discord). The previous clipboard contents are saved and restored automatically. Unicode-safe: Russian text round-trips cleanly through the Windows clipboard regardless of system locale.
+- **Clipboard paste output** — clipboard write + `Ctrl+V` into the focused window. Works anywhere paste does (Notepad, Office, IDEs, browsers, Slack, Discord). By default, the dictated text stays on the clipboard after paste so a missed auto-paste is recoverable with a manual `Ctrl+V`. Unicode-safe: Russian text round-trips cleanly through the Windows clipboard regardless of system locale.
 - **System tray menu** — pick input mic from a WASAPI device list, switch polish mode, quit. All selections persist to `config.toml` automatically.
 - **Pre-flight mic mute check + auto-unmute** — every PTT press first checks whether the default mic is muted (~0.2ms call into a thread-isolated `pycaw` worker). If muted, it unmutes; if it *can't* be unmuted (hardware mute switch / no permission), the overlay shows a solid red **"Mic muted"** pill instead of "Recording" and the recording is skipped entirely. No more silently dictating into a muted mic and getting Whisper's "Thank you" hallucination pasted into your window.
 - **Silent-mic guard** (final safety net) — if recording somehow still captures essentially silence (peak < 0.005), the pipeline short-circuits before the API call and toasts a warning instead of pasting hallucinated text.
@@ -105,6 +105,8 @@ show_all_backends = false        # tray: true = include MME/DirectSound/WDM-KS e
 polish_mode = "default"          # default | email | chat | code | translate_en | raw
 min_audio_seconds = 1.0          # pad short clips with trailing silence
 disable_gemini_thinking = false  # true is faster; false is safer for polish quality
+restore_clipboard = false        # true restores the previous clipboard after paste
+clipboard_restore_delay = 1.0    # seconds to wait before restore_clipboard runs
 
 # Optional: override built-in polish prompts or add your own modes.
 # [polish_modes]
@@ -114,6 +116,8 @@ disable_gemini_thinking = false  # true is faster; false is safer for polish qua
 The built-in polish prompts live in [`config.py`](config.py) (`DEFAULT_POLISH_MODES`). To customize, either edit them there or add a `[polish_modes]` table to `config.toml` — user values are merged on top of the defaults. To use a custom mode in the tray, add its key to `POLISH_MODE_LABELS` in `config.py`.
 
 `disable_gemini_thinking = false` keeps polish quality conservative. Set it to `true` only if you want to trade some prompt-following reliability for lower Gemini latency.
+
+`restore_clipboard = false` is intentional. If the target app misses the synthetic `Ctrl+V`, the dictated text remains the current clipboard item and you can paste it manually. If you set it to `true`, Windows clipboard history may show the previous clipboard item as newest because the app restores it after paste.
 
 ## How it works
 
@@ -126,7 +130,7 @@ Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  POST to Groq Whisper Large v3 Turbo
                  →  if polish_mode == "raw": skip LLM, use the transcript verbatim
                     else: POST transcript + active polish prompt to Gemini 3.1 Flash-Lite
-                 →  copy polished text to clipboard, send Ctrl+V, restore previous clipboard
+                 →  copy polished text to clipboard, send Ctrl+V
 ```
 
 Mic safety is two-layered:

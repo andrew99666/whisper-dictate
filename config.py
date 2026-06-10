@@ -140,6 +140,8 @@ class Config:
     log_path: str = "whisper-dictate.log"
     min_audio_seconds: float = 1.0
     disable_gemini_thinking: bool = False
+    restore_clipboard: bool = False
+    clipboard_restore_delay: float = 1.0
     show_all_backends: bool = False
     polish_mode: str = "default"           # active mode; "raw" skips LLM entirely
     polish_modes: dict[str, str] = field(default_factory=dict)  # populated from defaults + config.toml

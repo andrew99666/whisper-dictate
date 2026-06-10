@@ -20,6 +20,12 @@ min_audio_seconds = 1.0
 # Keep this off for higher-quality default polish.
 disable_gemini_thinking = false
 
+# Keep dictated text as the current clipboard item after paste. This makes failed
+# auto-pastes recoverable with a manual Ctrl+V and avoids re-adding old clipboard
+# contents as the latest item in Windows clipboard history.
+restore_clipboard = false
+clipboard_restore_delay = 1.0
+
 # Polish mode — selects which LLM prompt to use. Built-in modes:
 #   "default"      — cleanup + clarity (strip fillers, fix grammar)
 #   "email"        — formal-ish, paragraphs, suitable for an email body

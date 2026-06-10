@@ -165,7 +165,11 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
         if CFG.polish_mode == "raw":
             logger.info("raw mode: skipping LLM")
             t0 = time.perf_counter()
-            paste_text(txn.text)
+            paste_text(
+                txn.text,
+                restore_clipboard=CFG.restore_clipboard,
+                restore_delay=CFG.clipboard_restore_delay,
+            )
             timings["paste"] = (time.perf_counter() - t0) * 1000.0
         else:
             instruction = CFG.polish_modes.get(CFG.polish_mode, "")
@@ -183,7 +187,11 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
             logger.info("polished (mode=%s)=%r", CFG.polish_mode, polished)
             if polished:
                 t0 = time.perf_counter()
-                paste_text(polished)
+                paste_text(
+                    polished,
+                    restore_clipboard=CFG.restore_clipboard,
+                    restore_delay=CFG.clipboard_restore_delay,
+                )
                 timings["paste"] = (time.perf_counter() - t0) * 1000.0
     except Exception:
         logger.exception("pipeline crashed")

@@ -1,4 +1,4 @@
-"""Clipboard + auto-paste (Ctrl+V) into the focused window, with clipboard restore."""
+"""Clipboard + auto-paste (Ctrl+V) into the focused window."""
 from __future__ import annotations
 
 import ctypes
@@ -10,6 +10,7 @@ from pynput.keyboard import Controller, Key, KeyCode
 
 _kbd = Controller()
 _logger = logging.getLogger("whisper-dictate")
+DEFAULT_RESTORE_DELAY = 1.0
 
 
 def _foreground_window_name() -> str:
@@ -58,12 +59,14 @@ def _send_paste_chord() -> None:
     _kbd.release(Key.ctrl)
 
 
-def paste_text(text: str, restore_delay: float = 0.2, send_keys: bool = True) -> None:
-    """Copy `text` to clipboard, send Ctrl+V, then restore the previous clipboard."""
+def paste_text(text: str, restore_clipboard: bool = False,
+               restore_delay: float = DEFAULT_RESTORE_DELAY,
+               send_keys: bool = True) -> None:
+    """Copy `text` to clipboard, send Ctrl+V, optionally restore previous clipboard."""
     if not text:
         _logger.debug("paste: empty text, skipping")
         return
-    prev = _safe_get_clipboard()
+    prev = _safe_get_clipboard() if restore_clipboard else ""
     _safe_set_clipboard(text)
     # Verify clipboard write actually took (Windows can reject very rapid writes)
     written = _safe_get_clipboard()
@@ -75,9 +78,13 @@ def paste_text(text: str, restore_delay: float = 0.2, send_keys: bool = True) ->
         _logger.info("paste: sending Ctrl+V into window=%r", win_title[:80])
         _send_paste_chord()
         _logger.debug("paste: Ctrl+V sent")
+    if not restore_clipboard:
+        _logger.debug("paste: leaving dictated text on clipboard")
+        return
     if restore_delay <= 0:
         _safe_set_clipboard(prev)
         return
     restore = threading.Timer(restore_delay, _safe_set_clipboard, args=(prev,))
     restore.daemon = True
     restore.start()
+    _logger.debug("paste: clipboard restore scheduled in %.1fs", restore_delay)
