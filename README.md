@@ -1,6 +1,6 @@
 # Whisper Dictate — Push-to-Talk Voice Dictation for Windows
 
-Free, open-source voice dictation for Windows. Hold a hotkey, speak, release — get clean text inserted into the focused app in about **1 second**, end-to-end. A [Superwhisper](https://superwhisper.com) / [Wispr Flow](https://wisprflow.ai) alternative that runs on Windows, uses [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription, and [Gemini 3.1 Flash-Lite](https://ai.google.dev) for cleanup.
+Free, open-source voice dictation for Windows. Hold a hotkey, speak, release — get clean text inserted into the focused app in about **1–2 seconds**, end-to-end. A [Superwhisper](https://superwhisper.com) / [Wispr Flow](https://wisprflow.ai) alternative that runs on Windows, uses [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription, and [Gemini 3.5 Flash-Lite](https://ai.google.dev) for cleanup.
 
 Auto-detects **English and Russian** per utterance (Whisper supports 99+ languages).
 
@@ -12,9 +12,9 @@ End-to-end pipeline from key release to inserted text, measured on a typical res
 |---|---|
 | Audio resample 48kHz → 16kHz + FLAC encode | ~10ms |
 | Groq Whisper Large v3 Turbo (over network) | ~400ms |
-| Gemini 3.1 Flash-Lite polish | ~600ms |
+| Gemini 3.5 Flash-Lite polish | ~1.3s in a cold-process validation |
 | Clipboard write + Ctrl+V into focused app | ~10ms |
-| **Total** | **~1.0 second** |
+| **Total** | **~1–2 seconds, network-dependent** |
 
 How that compares (public reports + our measurements):
 
@@ -22,7 +22,7 @@ How that compares (public reports + our measurements):
 |---|---|---|---|
 | Superwhisper | macOS only | Subscription | ~0.5–1.5s |
 | Wispr Flow | macOS, Windows | Subscription | ~0.5–1s |
-| **Whisper Dictate** | **Windows** | **Free (BYO API keys)** | **~1.0s** |
+| **Whisper Dictate** | **Windows** | **Free (BYO API keys)** | **~1–2s** |
 
 Honest read: speed is competitive, not dramatically different. The advantage is **free + open-source + Windows-native**.
 
@@ -30,7 +30,7 @@ Honest read: speed is competitive, not dramatically different. The advantage is 
 
 - **Push-to-talk hotkey** — hold Right Ctrl (configurable), speak, release.
 - **Groq Whisper Large v3 Turbo** — fast cloud transcription at $0.04 per hour of audio. FLAC upload at 16kHz keeps payload tiny.
-- **Gemini 3.1 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, preserves the input language. Sub-second response for typical dictation lengths.
+- **Gemini 3.5 Flash-Lite polish** — strips filler words (`um`, `uh`, `ну`, `типа`), fixes grammar, rewrites for clarity, and preserves the input language.
 - **Tone-aware cleanup** — the default, email, chat, and translate modes use a compact personal tone guide: direct, practical, lightly warm, and plain-spoken without preserving typos or rough grammar.
 - **Prompt-safe polishing** — dictated text is treated as inert transcript data, not a command for Gemini to execute. If you dictate "write me a letter...", the app cleans that request instead of generating the letter.
 - **Floating overlay indicator** — a small dark pill with a Gaussian drop shadow appears bottom-center when recording. Pulsing red dot while recording, orange while processing. Click-through, never steals focus, hidden when idle.
@@ -129,7 +129,7 @@ Right Ctrl up    →  stop stream, drain callbacks, concatenate chunks
                  →  scipy.signal.resample_poly to 16kHz, encode as FLAC
                  →  POST to Groq Whisper Large v3 Turbo
                  →  if polish_mode == "raw": skip LLM, use the transcript verbatim
-                    else: POST transcript + active polish prompt to Gemini 3.1 Flash-Lite
+                    else: POST transcript + active polish prompt to Gemini 3.5 Flash-Lite
                  →  copy polished text to clipboard, send Ctrl+V
 ```
 

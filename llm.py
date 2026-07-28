@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import os
 import logging
+import time
 from functools import lru_cache
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
-MODEL_ID = "gemini-3.1-flash-lite"
+MODEL_ID = "gemini-3.5-flash-lite"
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 MIN_MAX_OUTPUT_TOKENS = 128
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_RETRY_DELAYS = (0.8, 1.8)
 
 PERSONAL_TONE_GUIDE = (
     "Tone guide: Use Andrew's tone of voice, not his typos or rough grammar. "
@@ -74,7 +77,26 @@ def _hit_max_tokens(resp) -> bool:
 
 def _looks_like_thinking_config_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return "thinking" in msg or "thinking_budget" in msg or "thinkingconfig" in msg
+    if "thinking" in msg or "thinking_budget" in msg or "thinkingconfig" in msg:
+        return True
+    return (
+        isinstance(exc, errors.APIError)
+        and getattr(exc, "code", None) == 400
+        and (getattr(exc, "status", "") or "").upper() == "INVALID_ARGUMENT"
+    )
+
+
+def _is_retryable_gemini_error(exc: Exception) -> bool:
+    if not isinstance(exc, errors.APIError):
+        return False
+    code = getattr(exc, "code", 0) or 0
+    status = (getattr(exc, "status", "") or "").upper()
+    return code in {408, 409, 429} or code >= 500 or status in {
+        "UNAVAILABLE",
+        "RESOURCE_EXHAUSTED",
+        "DEADLINE_EXCEEDED",
+        "INTERNAL",
+    }
 
 
 def _generate(user_msg: str, instruction: str, max_output_tokens: int,
@@ -94,6 +116,27 @@ def _generate(user_msg: str, instruction: str, max_output_tokens: int,
         contents=user_msg,
         config=types.GenerateContentConfig(**config_kwargs),
     )
+
+
+def _generate_with_retries(user_msg: str, instruction: str, max_output_tokens: int,
+                           thinking_budget: int | None) -> object:
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        try:
+            return _generate(user_msg, instruction, max_output_tokens, thinking_budget)
+        except Exception as e:
+            if not _is_retryable_gemini_error(e) or attempt >= GEMINI_MAX_ATTEMPTS:
+                raise
+            delay = GEMINI_RETRY_DELAYS[min(attempt - 1, len(GEMINI_RETRY_DELAYS) - 1)]
+            _logger.warning(
+                "Gemini transient error code=%s status=%s on attempt %d/%d; retrying in %.1fs",
+                getattr(e, "code", "?"),
+                getattr(e, "status", "?"),
+                attempt,
+                GEMINI_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable Gemini retry state")
 
 
 @lru_cache(maxsize=128)
@@ -121,7 +164,7 @@ def _polish_cached(raw_transcript: str, detected_language: str,
         else None
     )
     try:
-        resp = _generate(user_msg, instruction, max_output_tokens, use_thinking_budget)
+        resp = _generate_with_retries(user_msg, instruction, max_output_tokens, use_thinking_budget)
         if use_thinking_budget is not None and _thinking_config_supported is None:
             _thinking_config_supported = True
     except Exception as e:
@@ -129,14 +172,19 @@ def _polish_cached(raw_transcript: str, detected_language: str,
             _thinking_config_supported = False
             _logger.warning("Gemini thinking_config rejected; retrying without it")
             use_thinking_budget = None
-            resp = _generate(user_msg, instruction, max_output_tokens, None)
+            resp = _generate_with_retries(user_msg, instruction, max_output_tokens, None)
         else:
             raise
 
     if max_output_tokens < DEFAULT_MAX_OUTPUT_TOKENS and _hit_max_tokens(resp):
         _logger.info("Gemini polish hit %d-token cap; retrying with %d",
                      max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
-        resp = _generate(user_msg, instruction, DEFAULT_MAX_OUTPUT_TOKENS, use_thinking_budget)
+        resp = _generate_with_retries(
+            user_msg,
+            instruction,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            use_thinking_budget,
+        )
 
     text = (resp.text or "").strip()
     # Fallback: lite models occasionally return empty for trivial inputs ("okay", "yes").
