@@ -1,19 +1,21 @@
-"""Post-processing via Gemini Flash-Lite: clean fillers, fix grammar, clarify, preserve language."""
+"""Groq cleanup with configurable model, content checks, and GPT-OSS fallback."""
 from __future__ import annotations
 
-import os
 import logging
-import time
+import re
+from collections import Counter
+from decimal import Decimal
+from itertools import groupby
 from functools import lru_cache
 
-from google import genai
-from google.genai import errors, types
+from groq import Groq
+import config as cfg_mod
+from provider import get_client
 
-MODEL_ID = "gemini-3.5-flash-lite"
-DEFAULT_MAX_OUTPUT_TOKENS = 2048
-MIN_MAX_OUTPUT_TOKENS = 128
-GEMINI_MAX_ATTEMPTS = 3
-GEMINI_RETRY_DELAYS = (0.8, 1.8)
+MODEL_ID = cfg_mod.load().polish_model
+FALLBACK_MODEL_ID = "openai/gpt-oss-120b"
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+MIN_MAX_OUTPUT_TOKENS = 1024
 
 PERSONAL_TONE_GUIDE = (
     "Tone guide: Use Andrew's tone of voice, not his typos or rough grammar. "
@@ -39,109 +41,88 @@ Rules:
 5. Output ONLY the cleaned text. No preamble, no quotes, no explanations, no commentary. If the input is empty or pure noise, return an empty string.
 """.format(tone_guide=PERSONAL_TONE_GUIDE)
 
-_client: genai.Client | None = None
+_client: Groq | None = None
 _logger = logging.getLogger("whisper-dictate")
-_thinking_config_supported: bool | None = None
 
 
-def _get_client() -> genai.Client:
+def _get_client() -> Groq:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+        _client = get_client()
     return _client
 
 
 def _max_output_tokens_for(raw_transcript: str) -> int:
-    # Keep short dictations on a small decode budget. If a rare long output hits
-    # the cap, polish() retries once with the full default budget.
+    # GPT-OSS counts reasoning and visible output against the same token cap.
     return max(
         MIN_MAX_OUTPUT_TOKENS,
-        min(DEFAULT_MAX_OUTPUT_TOKENS, int(len(raw_transcript) / 2) + 128),
+        min(DEFAULT_MAX_OUTPUT_TOKENS, int(len(raw_transcript) / 2) + 512),
     )
-
-
-def _finish_reason(resp) -> str:
-    try:
-        candidates = getattr(resp, "candidates", None) or []
-        if not candidates:
-            return ""
-        reason = getattr(candidates[0], "finish_reason", "") or ""
-        return str(reason)
-    except Exception:
-        return ""
 
 
 def _hit_max_tokens(resp) -> bool:
-    return "MAX" in _finish_reason(resp).upper()
+    return bool(resp.choices and resp.choices[0].finish_reason == "length")
 
 
-def _looks_like_thinking_config_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    if "thinking" in msg or "thinking_budget" in msg or "thinkingconfig" in msg:
-        return True
-    return (
-        isinstance(exc, errors.APIError)
-        and getattr(exc, "code", None) == 400
-        and (getattr(exc, "status", "") or "").upper() == "INVALID_ARGUMENT"
+def _generate(user_msg: str, instruction: str, max_output_tokens: int) -> object:
+    try:
+        return _generate_model(MODEL_ID, user_msg, instruction, max_output_tokens)
+    except Exception:
+        if MODEL_ID == FALLBACK_MODEL_ID:
+            raise
+        _logger.warning("Cleanup model %s failed; retrying with %s", MODEL_ID, FALLBACK_MODEL_ID)
+        return _generate_model(FALLBACK_MODEL_ID, user_msg, instruction, max_output_tokens)
+
+
+def _generate_model(model: str, user_msg: str, instruction: str, max_output_tokens: int) -> object:
+    kwargs = {}
+    if model.startswith("openai/gpt-oss-"):
+        kwargs.update(reasoning_effort="low", include_reasoning=False)
+    elif model.startswith("qwen/"):
+        kwargs.update(reasoning_effort="none", include_reasoning=False)
+    return _get_client().chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.0 if model.startswith("qwen/") else 0.2,
+        max_completion_tokens=max_output_tokens,
+        **kwargs,
     )
 
 
-def _is_retryable_gemini_error(exc: Exception) -> bool:
-    if not isinstance(exc, errors.APIError):
-        return False
-    code = getattr(exc, "code", 0) or 0
-    status = (getattr(exc, "status", "") or "").upper()
-    return code in {408, 409, 429} or code >= 500 or status in {
-        "UNAVAILABLE",
-        "RESOURCE_EXHAUSTED",
-        "DEADLINE_EXCEEDED",
-        "INTERNAL",
-    }
+def _quality_issue(raw: str, cleaned: str) -> str:
+    """Conservative checks, not a general semantic-equivalence guarantee."""
+    def normalized(text):
+        return text.casefold().replace("\u2019", "'")
 
+    def numbers(text):
+        groups = re.findall(r"\d+(?:[ ,\u00a0\u202f]\d{3})*(?:\.\d+)?", text)
+        return Counter(Decimal(re.sub(r"[ ,\u00a0\u202f]", "", value)) for value in groups)
 
-def _generate(user_msg: str, instruction: str, max_output_tokens: int,
-              thinking_budget: int | None) -> object:
-    config_kwargs = {
-        "system_instruction": instruction,
-        "temperature": 0.2,
-        "max_output_tokens": max_output_tokens,
-    }
-    if thinking_budget is not None:
-        config_kwargs["thinking_config"] = types.ThinkingConfig(
-            thinking_budget=thinking_budget,
-        )
-    client = _get_client()
-    return client.models.generate_content(
-        model=MODEL_ID,
-        contents=user_msg,
-        config=types.GenerateContentConfig(**config_kwargs),
-    )
-
-
-def _generate_with_retries(user_msg: str, instruction: str, max_output_tokens: int,
-                           thinking_budget: int | None) -> object:
-    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
-        try:
-            return _generate(user_msg, instruction, max_output_tokens, thinking_budget)
-        except Exception as e:
-            if not _is_retryable_gemini_error(e) or attempt >= GEMINI_MAX_ATTEMPTS:
-                raise
-            delay = GEMINI_RETRY_DELAYS[min(attempt - 1, len(GEMINI_RETRY_DELAYS) - 1)]
-            _logger.warning(
-                "Gemini transient error code=%s status=%s on attempt %d/%d; retrying in %.1fs",
-                getattr(e, "code", "?"),
-                getattr(e, "status", "?"),
-                attempt,
-                GEMINI_MAX_ATTEMPTS,
-                delay,
-            )
-            time.sleep(delay)
-    raise RuntimeError("unreachable Gemini retry state")
+    raw, cleaned = normalized(raw), normalized(cleaned)
+    if numbers(raw) != numbers(cleaned):
+        return "changed, added, or dropped a number"
+    negations = r"\b(?:not|no|never|cannot|\w+n't|without|\u043d\u0435|\u043d\u0435\u0442|\u043d\u0438\u043a\u043e\u0433\u0434\u0430|\u0431\u0435\u0437)\b"
+    if len(re.findall(negations, cleaned)) < len(re.findall(negations, raw)):
+        return "dropped a negation or uncertainty statement"
+    uncertainty = r"\b(?:maybe|perhaps|might|may|probably|possibly|\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e)\b"
+    if re.search(uncertainty, raw) and not re.search(uncertainty, cleaned):
+        return "dropped uncertainty"
+    raw_words = re.findall(r"\w+(?:'\w+)?", raw)
+    cleaned_counts = Counter(re.findall(r"\w+(?:'\w+)?", cleaned))
+    raw_counts = Counter(raw_words)
+    for word, group in groupby(raw_words):
+        if len(list(group)) > 1 and word not in {"um", "uh", "\u044d\u043c", "\u043d\u0443"}:
+            if cleaned_counts[word] < raw_counts[word]:
+                return "collapsed repeated words"
+    return ""
 
 
 @lru_cache(maxsize=128)
 def _polish_cached(raw_transcript: str, detected_language: str,
-                   system_instruction: str, thinking_budget: int | None) -> str:
+                   system_instruction: str) -> str:
     """Clean up a transcript. detected_language is a hint (e.g. 'English', 'Russian').
 
     If system_instruction is non-empty, it overrides the built-in default.
@@ -157,50 +138,38 @@ def _polish_cached(raw_transcript: str, detected_language: str,
     instruction = system_instruction.strip() or SYSTEM_INSTRUCTION
     max_output_tokens = _max_output_tokens_for(raw_transcript)
 
-    global _thinking_config_supported
-    use_thinking_budget = (
-        thinking_budget
-        if thinking_budget is not None and _thinking_config_supported is not False
-        else None
-    )
-    try:
-        resp = _generate_with_retries(user_msg, instruction, max_output_tokens, use_thinking_budget)
-        if use_thinking_budget is not None and _thinking_config_supported is None:
-            _thinking_config_supported = True
-    except Exception as e:
-        if use_thinking_budget is not None and _looks_like_thinking_config_error(e):
-            _thinking_config_supported = False
-            _logger.warning("Gemini thinking_config rejected; retrying without it")
-            use_thinking_budget = None
-            resp = _generate_with_retries(user_msg, instruction, max_output_tokens, None)
-        else:
-            raise
+    resp = _generate(user_msg, instruction, max_output_tokens)
 
     if max_output_tokens < DEFAULT_MAX_OUTPUT_TOKENS and _hit_max_tokens(resp):
-        _logger.info("Gemini polish hit %d-token cap; retrying with %d",
+        _logger.info("Groq polish hit %d-token cap; retrying with %d",
                      max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
-        resp = _generate_with_retries(
-            user_msg,
-            instruction,
-            DEFAULT_MAX_OUTPUT_TOKENS,
-            use_thinking_budget,
-        )
+        resp = _generate(user_msg, instruction, DEFAULT_MAX_OUTPUT_TOKENS)
 
-    text = (resp.text or "").strip()
-    # Fallback: lite models occasionally return empty for trivial inputs ("okay", "yes").
-    # Return the raw transcript so the user isn't left with nothing pasted.
+    if _hit_max_tokens(resp):
+        raise RuntimeError("Groq polish exceeded its token cap; using raw dictation")
+    if not resp.choices:
+        raise RuntimeError("Groq polish returned no choices")
+    text = (resp.choices[0].message.content or "").strip()
+    if text and MODEL_ID != FALLBACK_MODEL_ID:
+        issue = _quality_issue(raw_transcript, text)
+        if issue:
+            _logger.warning("Cleanup validation: %s; retrying with %s", issue, FALLBACK_MODEL_ID)
+            resp = _generate_model(FALLBACK_MODEL_ID, user_msg, instruction, DEFAULT_MAX_OUTPUT_TOKENS)
+            if _hit_max_tokens(resp) or not resp.choices:
+                raise RuntimeError("Fallback cleanup was incomplete")
+            text = (resp.choices[0].message.content or "").strip()
+    # Preserve the transcript if the provider returns an empty answer.
     if not text:
         return raw_transcript.strip()
     return text
 
 
 def polish(raw_transcript: str, detected_language: str = "",
-           system_instruction: str = "", thinking_budget: int | None = 0) -> str:
+           system_instruction: str = "") -> str:
     if not raw_transcript.strip():
         return ""
     return _polish_cached(
         raw_transcript.strip(),
         detected_language,
         system_instruction,
-        thinking_budget,
     )

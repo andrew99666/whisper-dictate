@@ -5,7 +5,7 @@ hotkey = "ctrl_r"
 
 # Microphone device index. Leave commented to use the system default.
 # Run this to list devices: python -c "import sounddevice; print(sounddevice.query_devices())"
-mic_device = 23
+# mic_device = 0  # using system default
 
 # Windows toast notifications on API errors.
 enable_toasts = true
@@ -16,9 +16,14 @@ log_path = "whisper-dictate.log"
 # Pad recordings shorter than this with trailing silence (Groq's segment minimum).
 min_audio_seconds = 1.0
 
-# Lower-latency Gemini polish when the selected model supports disabling thinking.
-# Keep this off for higher-quality default polish.
-disable_gemini_thinking = false
+# Reuse capture and warm the shared Groq connection without uploading idle audio.
+keep_mic_stream_open = true
+warm_api_connection = true
+prepare_while_recording = false
+
+# Fast cleanup with GPT-OSS 120B fallback; existing tone prompts are unchanged.
+polish_model = "qwen/qwen3.8-27b"
+save_benchmark_recordings = false
 
 # Keep dictated text as the current clipboard item after paste. This makes failed
 # auto-pastes recoverable with a manual Ctrl+V and avoids re-adding old clipboard

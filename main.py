@@ -1,7 +1,7 @@
 """Whisper Dictate — push-to-talk voice dictation for Windows.
 
 Hold the configured hotkey (default: Right Ctrl) to record. Release to transcribe
-(Groq Whisper), polish (Gemini), and paste into the focused window.
+(Groq Whisper), clean up (Groq Qwen with GPT-OSS fallback), and paste into focus.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -21,14 +22,16 @@ from PySide6.QtCore import QMetaObject, Qt
 from PySide6.QtWidgets import QApplication
 
 import config as cfg_mod
-from audio import Recorder, SAMPLE_RATE, pad_to_min_duration
+from audio import Recorder, SAMPLE_RATE, pad_to_min_duration, save_wav
 from stt import transcribe
-from llm import polish
+from llm import MODEL_ID as POLISH_MODEL_ID, polish
 from paste import paste_text
 from tray import Tray
 from feedback import setup_logging, toast
 from mic_control import get_mic_control
 from overlay import Overlay
+from speculative import SpeculativeSession
+from provider import warm_during_capture
 
 CFG = cfg_mod.load()
 
@@ -92,7 +95,7 @@ def _parse_hotkey(name: str):
 
 PTT_KEY = _parse_hotkey(CFG.hotkey)
 
-_recorder = Recorder(device=CFG.mic_device)
+_recorder = Recorder(device=CFG.mic_device, keep_stream_open=CFG.keep_mic_stream_open)
 _recording = False
 _recording_lock = threading.Lock()  # protects _recording transitions
 _processing_lock = threading.Lock()
@@ -100,6 +103,8 @@ _tray: Tray | None = None
 _overlay: Overlay | None = None
 _listener: keyboard.Listener | None = None
 _qt_app: QApplication | None = None
+_speculation: SpeculativeSession | None = None
+_connection_warmup: threading.Event | None = None
 
 
 def _set_state(state: str) -> None:
@@ -113,7 +118,7 @@ def _timing_summary(timings: dict[str, float]) -> str:
     return " ".join(f"{name}={value:.0f}ms" for name, value in timings.items())
 
 
-def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
+def _process(audio, rate: int, stop_ms: float = 0.0, speculation=None) -> None:
     """STT -> polish -> paste. Runs in a worker thread."""
     if not _processing_lock.acquire(blocking=False):
         logger.info("dropped utterance: previous pipeline still running")
@@ -135,6 +140,10 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
             import numpy as _np
             t0 = time.perf_counter()
             peak = float(_np.max(_np.abs(audio)))
+            rms = float(_np.sqrt(_np.mean(audio * audio)))
+            clipped = float(_np.mean(_np.abs(audio) >= 0.999))
+            logger.info("audio levels: peak=%.6f rms=%.6f clipped=%.4f dur=%.2fs rate=%dHz",
+                        peak, rms, clipped, audio.size / rate, rate)
             timings["silence_check"] = (time.perf_counter() - t0) * 1000.0
             if peak < 0.005:
                 logger.warning("silent audio (peak=%.5f, dur=%.2fs) — skipping pipeline",
@@ -146,9 +155,26 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
         t0 = time.perf_counter()
         padded = pad_to_min_duration(audio, rate, min_seconds=CFG.min_audio_seconds)
         timings["pad"] = (time.perf_counter() - t0) * 1000.0
+        prepared = None
+        instruction = CFG.polish_modes.get(CFG.polish_mode, "")
+        if speculation is not None:
+            future = speculation.candidate(audio, rate, CFG.polish_mode, instruction)
+            if future is not None:
+                t0 = time.perf_counter()
+                try:
+                    prepared = future.result(timeout=2.0)
+                    if not prepared.transcription.text.strip() or not prepared.text.strip():
+                        prepared = None
+                        raise ValueError("Prepared dictation was empty")
+                    timings["prepare_wait"] = (time.perf_counter() - t0) * 1000
+                    timings["prepared_cloud_work"] = (prepared.finished_at - prepared.started_at) * 1000
+                    logger.info("prepared result reused: requests=%d frames=%d", speculation.requests, prepared.frames)
+                except Exception:
+                    prepared = None
+                    logger.info("prepared result unavailable; processing complete recording")
         try:
             t0 = time.perf_counter()
-            txn = transcribe(padded, rate)
+            txn = prepared.transcription if prepared is not None else transcribe(padded, rate)
             timings["stt_total"] = (time.perf_counter() - t0) * 1000.0
             timings["stt_encode"] = txn.encode_ms
             timings["stt_request"] = txn.request_ms
@@ -175,8 +201,7 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
             instruction = CFG.polish_modes.get(CFG.polish_mode, "")
             t0 = time.perf_counter()
             try:
-                thinking_budget = 0 if CFG.disable_gemini_thinking else None
-                polished = polish(txn.text, txn.language, instruction, thinking_budget)
+                polished = prepared.text if prepared is not None else polish(txn.text, txn.language, instruction)
             except Exception as e:
                 logger.exception("LLM polish failed")
                 if CFG.enable_toasts:
@@ -184,7 +209,7 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
                 polished = txn.text  # fall back to raw transcript
             finally:
                 timings["polish"] = (time.perf_counter() - t0) * 1000.0
-            logger.info("polished (mode=%s)=%r", CFG.polish_mode, polished)
+            logger.info("polished (mode=%s model=%s)=%r", CFG.polish_mode, POLISH_MODEL_ID, polished)
             if polished:
                 t0 = time.perf_counter()
                 paste_text(
@@ -205,21 +230,37 @@ def _process(audio, rate: int, stop_ms: float = 0.0) -> None:
 
 def _stop_and_process(reason: str) -> None:
     """Centralized stop path: stops recorder, kicks processing."""
-    global _recording
+    global _recording, _speculation, _connection_warmup
     with _recording_lock:
         if not _recording:
             return
         _recording = False
+        speculation = _speculation
+        _speculation = None
+        if _connection_warmup is not None:
+            _connection_warmup.set()
+            _connection_warmup = None
     t0 = time.perf_counter()
     audio, rate = _recorder.stop()
     stop_ms = (time.perf_counter() - t0) * 1000.0
     dur = audio.size / rate
     logger.info("record stop [%s] (%.2fs @ %dHz, stop=%.0fms)", reason, dur, rate, stop_ms)
-    threading.Thread(target=_process, args=(audio, rate, stop_ms), daemon=True).start()
+    if CFG.save_benchmark_recordings and audio.size:
+        def save_recording():
+            try:
+                folder = Path(_SCRIPT_DIR) / "benchmark_recordings"
+                folder.mkdir(exist_ok=True)
+                path = folder / f"dictation-{time.time_ns()}.wav"
+                save_wav(audio, str(path), rate)
+                logger.info("benchmark recording saved: %s", path.name)
+            except Exception:
+                logger.exception("benchmark recording save failed")
+        threading.Thread(target=save_recording, daemon=True).start()
+    threading.Thread(target=_process, args=(audio, rate, stop_ms, speculation), daemon=True).start()
 
 
 def _on_press(key):
-    global _recording
+    global _recording, _speculation, _connection_warmup
     if key != PTT_KEY:
         return
     logger.debug("on_press PTT (recording=%s)", _recording)
@@ -244,7 +285,12 @@ def _on_press(key):
     logger.info("record start")
     _set_state("recording")
     try:
-        _recorder.start()
+        instruction = CFG.polish_modes.get(CFG.polish_mode, "")
+        _speculation = (SpeculativeSession(CFG.polish_mode, instruction, CFG.min_audio_seconds)
+                        if CFG.prepare_while_recording else None)
+        _recorder.start(on_chunk=_speculation.push if _speculation is not None else None)
+        if CFG.warm_api_connection:
+            _connection_warmup = warm_during_capture()
     except Exception as e:
         logger.exception("recorder.start failed")
         with _recording_lock:
@@ -266,6 +312,11 @@ def _on_quit() -> None:
     logger.info("quit requested")
     if _listener is not None:
         _listener.stop()
+    if _speculation is not None:
+        _speculation.disable()
+    if _connection_warmup is not None:
+        _connection_warmup.set()
+    _recorder.close()
     if _overlay is not None:
         _overlay.stop()
     # Tray.run blocks in its own thread; calling icon.stop() ends that loop.
@@ -341,7 +392,7 @@ def _on_select_polish_mode(mode: str) -> None:
 
 def main() -> int:
     global _tray, _overlay, _listener, _qt_app
-    for var in ("GROQ_API_KEY", "GOOGLE_API_KEY"):
+    for var in ("GROQ_API_KEY",):
         if not os.environ.get(var):
             msg = f"{var} not set in .env"
             print(f"error: {msg}", file=sys.stderr)
@@ -353,11 +404,12 @@ def main() -> int:
     _qt_app = QApplication.instance() or QApplication(sys.argv)
     _qt_app.setQuitOnLastWindowClosed(False)  # closing the overlay must not quit the app
 
-    _overlay = Overlay()
+    _overlay = Overlay(level_provider=_recorder.meter_level)
 
     _listener = keyboard.Listener(on_press=_on_press, on_release=_on_release)
     _listener.start()
-    logger.info("started (hotkey=%s, mic_device=%s)", CFG.hotkey, CFG.mic_device)
+    logger.info("started (hotkey=%s, mic_device=%s, polish_model=%s)",
+                CFG.hotkey, CFG.mic_device, POLISH_MODEL_ID)
     print(f"Whisper Dictate ready. Hold {CFG.hotkey} to dictate. Right-click tray icon to quit.")
 
     # Build ordered list of (key, label) for the Polish-mode submenu.

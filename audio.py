@@ -8,6 +8,7 @@ so dictations of arbitrary length work — 1s ≈ 200KB, 1 hour ≈ 700MB at
 from __future__ import annotations
 
 import io
+import logging
 import threading
 import time
 import wave
@@ -20,6 +21,21 @@ from scipy import signal
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 DTYPE = "float32"
+_logger = logging.getLogger("whisper-dictate")
+
+
+def _default_wasapi_input() -> int | None:
+    """Use Windows' WASAPI default without persisting a volatile device index."""
+    try:
+        for api in sd.query_hostapis():
+            if api.get("name") != "Windows WASAPI":
+                continue
+            device = int(api.get("default_input_device", -1))
+            if device >= 0 and sd.query_devices(device, kind="input")["max_input_channels"] > 0:
+                return device
+    except Exception:
+        pass
+    return None
 
 
 def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -40,20 +56,23 @@ class Recorder:
     rate (WASAPI refuses non-native rates); the caller resamples downstream.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | None = None):
+    def __init__(self, sample_rate: int = SAMPLE_RATE, device: int | None = None,
+                 keep_stream_open: bool = True):
         self.requested_sample_rate = sample_rate
         self.device = device
+        self.keep_stream_open = keep_stream_open
         self._stream: sd.InputStream | None = None
         self._chunks: list[np.ndarray] = []
         self._chunks_lock = threading.Lock()
         self._actual_rate: int = sample_rate
+        self._capturing = False
+        self._opened_device: int | None = None
+        self._on_chunk = None
 
     def _rate_for_device(self, device: int | None) -> int:
-        """Native sample rate for a device, or requested rate for the default device."""
-        if device is None:
-            return self.requested_sample_rate
+        """Native sample rate for the selected or system-default input device."""
         try:
-            info = sd.query_devices(device)
+            info = sd.query_devices(device, kind="input")
             native = int(info.get("default_samplerate") or 0)
             return native if native > 0 else self.requested_sample_rate
         except Exception:
@@ -65,23 +84,57 @@ class Recorder:
         # likely segfault source. Swallow everything.
         try:
             with self._chunks_lock:
-                self._chunks.append(indata.copy())
+                if self._capturing:
+                    chunk = indata.copy()
+                    self._chunks.append(chunk)
+                    if self._on_chunk is not None:
+                        try:
+                            self._on_chunk(chunk, self._actual_rate)
+                        except Exception:
+                            self._on_chunk = None
         except Exception:
             pass
 
-    def start(self) -> None:
+    def meter_level(self) -> float:
+        """Read the latest captured block for UI only; never wait on the callback."""
+        if not self._chunks_lock.acquire(blocking=False):
+            return 0.0
+        try:
+            chunk = self._chunks[-1] if self._capturing and self._chunks else None
+        finally:
+            self._chunks_lock.release()
+        if chunk is None or chunk.size == 0:
+            return 0.0
+        samples = chunk.reshape(-1)[::8]
+        return float(np.sqrt(np.mean(samples * samples)))
+
+    def start(self, on_chunk=None) -> None:
         """Open an InputStream on the configured device; fall back to default on failure.
 
         WASAPI can intermittently fail with WDM-KS pin errors (GLE 0x490). Falling
         back to the system default (typically MME) is more forgiving.
         """
+        preferred = self.device if self.device is not None else _default_wasapi_input()
+        if self._stream is not None:
+            try:
+                active = bool(self._stream.active)
+            except Exception:
+                active = False
+            if self._opened_device == preferred and active:
+                with self._chunks_lock:
+                    self._chunks.clear()
+                    self._on_chunk = on_chunk
+                    self._capturing = True
+                return
+            self.close()
         with self._chunks_lock:
             self._chunks.clear()
-
+            self._on_chunk = on_chunk
+            self._capturing = True
         candidates: list[tuple[int | None, int]] = [
-            (self.device, self._rate_for_device(self.device)),
+            (preferred, self._rate_for_device(preferred)),
         ]
-        if self.device is not None:
+        if preferred is not None:
             candidates.append((None, self._rate_for_device(None)))
 
         last_err: Exception | None = None
@@ -95,8 +148,16 @@ class Recorder:
                         device=dev,
                         callback=self._on_audio,
                     )
-                    self._stream.start()
                     self._actual_rate = rate
+                    self._stream.start()
+                    self._opened_device = dev
+                    try:
+                        info = sd.query_devices(dev, kind="input")
+                        backend = sd.query_hostapis(info["hostapi"])["name"]
+                        _logger.info("record input: device=%s name=%r backend=%r rate=%dHz",
+                                     dev if dev is not None else "default", info["name"], backend, rate)
+                    except Exception:
+                        pass
                     return
                 except Exception as e:
                     last_err = e
@@ -108,16 +169,29 @@ class Recorder:
                         self._stream = None
                     time.sleep(0.15)
         assert last_err is not None
+        with self._chunks_lock:
+            self._capturing = False
         raise last_err
 
     def stop(self) -> tuple[np.ndarray, int]:
-        """Returns (audio, sample_rate). Caller uses the returned rate downstream.
-
-        Closes the stream defensively: stop() then a short drain delay before
-        close(). PortAudio's Windows backend can crash if close() races with an
-        in-flight callback; the delay gives any pending callback time to return.
-        """
+        """Detach captured audio; retain the stream unless reuse is disabled."""
         rate = self._actual_rate
+        with self._chunks_lock:
+            self._capturing = False
+            self._on_chunk = None
+            chunks = self._chunks
+            self._chunks = []
+        if not self.keep_stream_open:
+            self.close()
+        if not chunks:
+            return np.zeros(0, dtype=np.float32), rate
+        audio = np.concatenate(chunks, axis=0).flatten()
+        return audio, rate
+
+    def close(self) -> None:
+        """Close at quit/device change, preserving the PortAudio drain safeguard."""
+        with self._chunks_lock:
+            self._capturing = False
         stream = self._stream
         self._stream = None  # detach first so the callback is harmless if it fires
         if stream is not None:
@@ -131,13 +205,6 @@ class Recorder:
                 stream.close()
             except Exception:
                 pass
-        with self._chunks_lock:
-            chunks = self._chunks
-            self._chunks = []
-        if not chunks:
-            return np.zeros(0, dtype=np.float32), rate
-        audio = np.concatenate(chunks, axis=0).flatten()
-        return audio, rate
 
 
 def pad_to_min_duration(audio: np.ndarray, sample_rate: int, min_seconds: float = 1.0) -> np.ndarray:

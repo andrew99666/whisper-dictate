@@ -9,6 +9,7 @@ from groq import Groq
 
 from audio import to_flac_bytes
 import numpy as np
+from provider import get_client
 
 MODEL_ID = "whisper-large-v3-turbo"
 
@@ -28,7 +29,7 @@ _client: Groq | None = None
 def _get_client() -> Groq:
     global _client
     if _client is None:
-        _client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        _client = get_client().with_options(timeout=60)
     return _client
 
 

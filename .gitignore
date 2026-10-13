@@ -4,4 +4,10 @@ __pycache__/
 *.pyc
 *.wav
 *.log
+*.log.*
+benchmark_recordings/
+speed_results*.json
+ui_previews/
 bench_results.json
+bench_audio_results.json
+bench_20b_results.json

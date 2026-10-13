@@ -1,227 +1,226 @@
-"""Modern floating-pill indicator built on PySide6.
-
-Visual:
-  - The window itself is transparent (per-pixel alpha via WA_TranslucentBackground).
-  - The pill is a child widget centered inside with a real Gaussian drop shadow
-    (QGraphicsDropShadowEffect) — looks like it's floating on any background.
-  - Pill body: near-opaque dark with a hairline highlight on top.
-  - Smooth anti-aliased rounded corners (QPainter, no chroma keys).
-  - Animated dot: red while recording with gentle alpha pulse, orange when processing.
-  - System font (Segoe UI Variable on Win11).
-
-Architecture:
-  - Qt requires its event loop on the MAIN thread on Windows.
-  - This module exposes a widget + a thin `Overlay` facade. `Overlay` does NOT
-    create or run the QApplication — main.py does that. `set_state()` is
-    thread-safe (marshals via QMetaObject.invokeMethod / QueuedConnection),
-    so the pynput keyboard listener and pystray callbacks can call it freely.
-"""
+"""Click-through dictation status; painting and telemetry polling stay on Qt."""
 from __future__ import annotations
 
-from typing import Optional
+import math
+import time
+from collections import deque
+from typing import Callable
 
-from PySide6.QtCore import (
-    Qt, QTimer, Slot, QMetaObject, Q_ARG, QRectF, QPointF,
-)
-from PySide6.QtGui import (
-    QPainter, QColor, QFont, QBrush, QPen, QGuiApplication,
-)
-from PySide6.QtWidgets import QApplication, QWidget, QGraphicsDropShadowEffect
+from PySide6.QtCore import Qt, QTimer, Slot, QMetaObject, Q_ARG, QRectF, QPointF
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QGuiApplication, QCursor
+from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect
 
-
-# --------------------------- design constants ---------------------------
-
-# Outer window includes generous padding so the drop shadow can render without clipping.
 _PADDING = 24
-
-_PILL_W = 168
-_PILL_H = 38
-
+_PILL_W = 284
+_PILL_H = 54
 _WIDTH = _PILL_W + _PADDING * 2
 _HEIGHT = _PILL_H + _PADDING * 2
+_BOTTOM_MARGIN = 28
 
-_BOTTOM_MARGIN = 64  # bottom of pill, measured from screen bottom
-
-_PILL_FILL = QColor(28, 28, 30, 235)      # nearly opaque, slight translucency
-_PILL_STROKE = QColor(255, 255, 255, 26)   # thin highlight along the edge
-_TEXT_COLOR = QColor(242, 242, 247)
-
-_DOT_REC = (255, 69, 58)     # systemRed (Dark Mode)
-_DOT_PROC = (255, 159, 10)   # systemOrange (Dark Mode)
-_DOT_MUTED = (255, 69, 58)   # systemRed — same as recording but solid (no pulse)
-
-_LABELS = {
-    "recording":  "Recording",
-    "processing": "Processing",
-    "muted":      "Mic muted",
-}
+_FILL = QColor(22, 24, 27, 250)
+_TEXT = QColor(244, 245, 247)
+_SECONDARY = QColor(153, 160, 170)
+_RECORDING = QColor(255, 112, 116)
+_PROCESSING = QColor(107, 222, 192)
+_MUTED = QColor(255, 188, 111)
+_LABELS = {"recording": "Recording", "processing": "Processing", "muted": "Mic muted"}
 
 
-# --------------------------- pill child widget ---------------------------
+def _font(size: int, weight=QFont.Medium) -> QFont:
+    font = QFont()
+    font.setFamilies(["Segoe UI Variable", "Segoe UI", "Arial"])
+    font.setPixelSize(size)
+    font.setWeight(weight)
+    return font
+
+
+def _clock(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
 
 class _PillWidget(QWidget):
-    """The actual visual pill. Has a Gaussian drop shadow applied by its parent."""
-
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        self.resize(_PILL_W, _PILL_H)
+        self.setFixedSize(_PILL_W, _PILL_H)
         self._state = "idle"
-        self._pulse = 1.0
+        self._elapsed = 0.0
+        self._levels = deque([0.0] * 9, maxlen=9)
 
     def set_state(self, state: str) -> None:
         self._state = state
+        self._elapsed = 0.0
+        self._levels = deque([0.0] * 9, maxlen=9)
         self.update()
 
-    def set_pulse(self, value: float) -> None:
-        self._pulse = value
+    def set_frame(self, elapsed: float, level: float = 0.0) -> None:
+        self._elapsed = elapsed
+        # This display mapping never modifies the captured audio.
+        strength = max(0.0, min(1.0, (level - 0.001) / 0.035))
+        self._levels.append(math.sqrt(strength))
         self.update()
 
-    def paintEvent(self, ev) -> None:
+    def paintEvent(self, event) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.TextAntialiasing, True)
-
-        rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        radius = rect.height() / 2
-
-        # Pill body
-        p.setBrush(QBrush(_PILL_FILL))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(rect, radius, radius)
-
-        # Hairline highlight along the edge
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        body = QRectF(0.5, 0.5, _PILL_W - 1, _PILL_H - 1)
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.setBrush(_FILL)
+        p.drawRoundedRect(body, 27, 27)
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(_PILL_STROKE, 1))
-        p.drawRoundedRect(rect, radius, radius)
+        p.setPen(QPen(QColor(255, 255, 255, 8), 1))
+        p.drawRoundedRect(body.adjusted(1, 1, -1, -1), 26, 26)
 
-        # Dot
-        if self._state in _LABELS:
-            if self._state == "muted":
-                r, g, b = _DOT_MUTED
-                alpha = 1.0
-            elif self._state == "recording":
-                r, g, b = _DOT_REC
-                alpha = self._pulse  # pulse while recording
-            else:  # processing
-                r, g, b = _DOT_PROC
-                alpha = 1.0
-            dot = QColor(r, g, b, int(255 * alpha))
-            p.setBrush(QBrush(dot))
+        if self._state not in _LABELS:
+            return
+        accent = {"recording": _RECORDING, "processing": _PROCESSING,
+                  "muted": _MUTED}[self._state]
+        center = QPointF(27, 27)
+        if self._state == "recording":
+            p.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 55), 1))
+            p.drawEllipse(center, 9, 9)
             p.setPen(Qt.NoPen)
-            dot_size = 9.0
-            dot_x = 16.0
-            dot_y = (self.height() - dot_size) / 2
-            p.drawEllipse(QPointF(dot_x + dot_size / 2, dot_y + dot_size / 2),
-                          dot_size / 2, dot_size / 2)
+            p.setBrush(accent)
+            p.drawEllipse(center, 4, 4)
+        elif self._state == "processing":
+            p.setPen(QPen(QColor(107, 222, 192, 35), 2))
+            p.drawEllipse(center, 7, 7)
+            p.setPen(QPen(accent, 2, Qt.SolidLine, Qt.RoundCap))
+            angle = int(-self._elapsed * 260 * 16)
+            p.drawArc(QRectF(20, 20, 14, 14), angle, 100 * 16)
+        else:
+            p.setPen(QPen(accent, 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawEllipse(center, 7, 7)
+            p.drawLine(QPointF(22, 32), QPointF(32, 22))
 
-        # Text
-        label = _LABELS.get(self._state, "")
-        if label:
-            p.setPen(_TEXT_COLOR)
-            font = QFont("Segoe UI Variable", 10)
-            font.setWeight(QFont.Medium)
-            p.setFont(font)
-            text_rect = self.rect().adjusted(34, 0, -14, 0)
-            p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, label)
+        p.setFont(_font(13, QFont.DemiBold))
+        p.setPen(_TEXT)
+        p.drawText(QRectF(45, 0, 99, _PILL_H), Qt.AlignVCenter | Qt.AlignLeft,
+                   _LABELS[self._state])
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
+        p.drawLine(QPointF(147, 18), QPointF(147, 36))
 
+        if self._state == "recording":
+            p.setPen(Qt.NoPen)
+            for index, level in enumerate(self._levels):
+                height = 3 + level * 22
+                color = QColor(accent)
+                color.setAlpha(100 + int(level * 155))
+                p.setBrush(color)
+                p.drawRoundedRect(QRectF(164 + index * 6, 27 - height / 2, 3, height), 1.5, 1.5)
+            p.setFont(_font(12))
+            p.setPen(_SECONDARY)
+            # Bound the clock track even for hours-long dictations.
+            clock_rect = QRectF(220, 0, 49, _PILL_H)
+            text = _clock(self._elapsed)
+            while p.fontMetrics().horizontalAdvance(text) > clock_rect.width() and p.font().pixelSize() > 8:
+                font = p.font()
+                font.setPixelSize(font.pixelSize() - 1)
+                p.setFont(font)
+            p.drawText(clock_rect, Qt.AlignVCenter | Qt.AlignRight, text)
+        elif self._state == "processing":
+            p.setPen(Qt.NoPen)
+            # Indeterminate motion, not a fabricated completion percentage.
+            for index in range(15):
+                wave = (1 + math.cos(index * 0.45 - self._elapsed * 5)) / 2
+                color = QColor(accent)
+                color.setAlpha(45 + int(wave * 180))
+                height = 3 + wave * 10
+                p.setBrush(color)
+                p.drawRoundedRect(QRectF(165 + index * 6, 27 - height / 2, 3, height), 1.5, 1.5)
+        else:
+            p.setPen(QPen(QColor(153, 160, 170, 110), 2, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(166, 27), QPointF(263, 27))
 
-# --------------------------- outer (transparent) overlay widget ---------------------------
 
 class _OverlayWidget(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, level_provider: Callable[[], float] | None = None) -> None:
         super().__init__()
         self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool
-            | Qt.WindowTransparentForInput
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
             | Qt.NoDropShadowWindowHint
         )
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.resize(_WIDTH, _HEIGHT)
-
-        # Pill child centered inside the outer window (which has padding for the shadow).
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(_WIDTH, _HEIGHT)
         self._pill = _PillWidget(self)
-        pill_x = (_WIDTH - _PILL_W) // 2
-        pill_y = (_HEIGHT - _PILL_H) // 2
-        self._pill.move(pill_x, pill_y)
-
-        # Real Gaussian drop shadow — gives the pill visible elevation on any background.
+        self._pill.move(_PADDING, _PADDING)
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 160))
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 5)
+        shadow.setColor(QColor(0, 0, 0, 110))
         self._pill.setGraphicsEffect(shadow)
-
-        # Position the pill so it ends up centered horizontally, with the pill's bottom
-        # at (screen_bottom - _BOTTOM_MARGIN). We have padding around the pill in the
-        # outer window, so the window's bottom is _PADDING below the pill's bottom.
-        screen = QGuiApplication.primaryScreen().geometry()
-        x = screen.x() + (screen.width() - _WIDTH) // 2
-        y = screen.y() + screen.height() - _HEIGHT - (_BOTTOM_MARGIN - _PADDING)
-        self.move(x, y)
-
         self._state = "idle"
-        self._pulse = 1.0
-        self._pulse_step = -0.035
-
+        self._started_at = 0.0
+        self._level_provider = level_provider
         self._timer = QTimer(self)
-        self._timer.setInterval(40)  # ~25 fps
+        self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
+
+    def _position(self) -> None:
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        self.move(area.x() + (area.width() - _WIDTH) // 2,
+                  area.y() + area.height() - _HEIGHT - _BOTTOM_MARGIN + _PADDING)
 
     @Slot(str)
     def set_state_slot(self, state: str) -> None:
+        state = state if state in _LABELS else "idle"
         if state == self._state:
             return
         self._state = state
-        if state == "recording":
-            self._pulse = 1.0
-            self._pulse_step = -0.035
-            if not self._timer.isActive():
-                self._timer.start()
-            self._pill.set_state(state)
-            self.show()
-        elif state in _LABELS:
-            self._timer.stop()
-            self._pulse = 1.0
-            self._pill.set_pulse(1.0)
-            self._pill.set_state(state)
-            self.show()
-        else:
+        self._pill.set_state(state)
+        if state == "idle":
             self._timer.stop()
             self.hide()
-        self._pill.update()
+            return
+        self._started_at = time.monotonic()
+        if state in ("recording", "processing"):
+            self._timer.start()
+        else:
+            self._timer.stop()
+        if not self.isVisible():
+            self._position()
+            self.show()
 
     def _tick(self) -> None:
-        self._pulse += self._pulse_step
-        if self._pulse <= 0.55:
-            self._pulse = 0.55
-            self._pulse_step = -self._pulse_step
-        elif self._pulse >= 1.0:
-            self._pulse = 1.0
-            self._pulse_step = -self._pulse_step
-        self._pill.set_pulse(self._pulse)
+        level = 0.0
+        if self._state == "recording" and self._level_provider is not None:
+            try:
+                level = float(self._level_provider())
+                if not math.isfinite(level):
+                    level = 0.0
+            except Exception:
+                pass
+        self._pill.set_frame(time.monotonic() - self._started_at, level)
 
+    def closeEvent(self, event) -> None:
+        self._timer.stop()
+        super().closeEvent(event)
 
-# --------------------------- public facade ---------------------------
 
 class Overlay:
-    """Thread-safe facade. Construct AFTER QApplication exists, on the main thread."""
+    """Construct on the Qt main thread; set_state is safe from worker threads."""
 
-    def __init__(self) -> None:
-        self._widget: Optional[_OverlayWidget] = _OverlayWidget()
+    def __init__(self, level_provider: Callable[[], float] | None = None) -> None:
+        self._widget = _OverlayWidget(level_provider)
 
     def set_state(self, state: str) -> None:
-        """Safe to call from any thread."""
         if self._widget is None:
             return
         try:
-            QMetaObject.invokeMethod(
-                self._widget, "set_state_slot",
-                Qt.QueuedConnection, Q_ARG(str, state),
-            )
-        except Exception:
+            QMetaObject.invokeMethod(self._widget, "set_state_slot",
+                                     Qt.QueuedConnection, Q_ARG(str, state))
+        except RuntimeError:
             pass
 
     def stop(self) -> None:
@@ -229,5 +228,5 @@ class Overlay:
             return
         try:
             QMetaObject.invokeMethod(self._widget, "close", Qt.QueuedConnection)
-        except Exception:
+        except RuntimeError:
             pass

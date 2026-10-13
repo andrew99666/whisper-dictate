@@ -12,7 +12,7 @@ from pynput.keyboard import Controller, Key, KeyCode
 _kbd = Controller()
 _logger = logging.getLogger("whisper-dictate")
 DEFAULT_RESTORE_DELAY = 1.0
-CLIPBOARD_SETTLE_DELAY = 0.05
+CLIPBOARD_SETTLE_DELAY = 0.01
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -145,17 +145,24 @@ def _send_key(vk: int, key_up: bool = False) -> bool:
 
 
 def _send_paste_chord_sendinput() -> bool:
-    ok = True
-    ok = _send_key(VK_LCONTROL) and ok
-    time.sleep(0.06)
-    ok = _send_key(VK_V) and ok
-    time.sleep(0.04)
-    ok = _send_key(VK_V, key_up=True) and ok
-    time.sleep(0.04)
-    ok = _send_key(VK_LCONTROL, key_up=True) and ok
-    if ok:
-        _logger.debug("paste: Ctrl+V sent via SendInput")
-    return ok
+    # SendInput preserves the order of one batch without interleaving other input.
+    events = (INPUT * 4)(*(
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(
+            wVk=vk, dwFlags=KEYEVENTF_KEYUP if key_up else 0,
+        )) for vk, key_up in (
+            (VK_LCONTROL, False), (VK_V, False), (VK_V, True), (VK_LCONTROL, True),
+        )
+    ))
+    sent = user32.SendInput(4, events, ctypes.sizeof(INPUT))
+    if sent == 4:
+        _logger.debug("paste: Ctrl+V sent via batched SendInput")
+        return True
+    _logger.warning("paste: batched SendInput sent=%s err=%s", sent, ctypes.get_last_error())
+    if sent:
+        _send_key(VK_V, key_up=True)
+        _send_key(VK_LCONTROL, key_up=True)
+        raise RuntimeError("Paste shortcut was partially sent; text remains on clipboard")
+    return False
 
 
 def _send_paste_chord_pynput() -> None:
@@ -190,13 +197,13 @@ def paste_text(text: str, restore_clipboard: bool = False,
         _logger.debug("paste: empty text, skipping")
         return
     prev = _safe_get_clipboard() if restore_clipboard else ""
-    _safe_set_clipboard(text)
-    time.sleep(CLIPBOARD_SETTLE_DELAY)
-    # Verify clipboard write actually took (Windows can reject very rapid writes)
-    written = _safe_get_clipboard()
-    if written != text:
-        _logger.warning("paste: clipboard write mismatch — wrote %d chars, read back %d",
-                        len(text), len(written))
+    for attempt in range(4):
+        _safe_set_clipboard(text)
+        if _safe_get_clipboard() == text:
+            break
+        time.sleep(CLIPBOARD_SETTLE_DELAY * (attempt + 1))
+    else:
+        raise RuntimeError("Clipboard write could not be verified; refusing to paste stale text")
     if send_keys:
         win = _foreground_window_snapshot()
         _logger.info("paste: sending Ctrl+V into window=%s", win[:160])

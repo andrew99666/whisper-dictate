@@ -139,7 +139,11 @@ class Config:
     enable_toasts: bool = True
     log_path: str = "whisper-dictate.log"
     min_audio_seconds: float = 1.0
-    disable_gemini_thinking: bool = False
+    keep_mic_stream_open: bool = True
+    prepare_while_recording: bool = False
+    warm_api_connection: bool = True
+    polish_model: str = "qwen/qwen3.8-27b"
+    save_benchmark_recordings: bool = False
     restore_clipboard: bool = False
     clipboard_restore_delay: float = 1.0
     show_all_backends: bool = False
