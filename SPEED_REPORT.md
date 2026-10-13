@@ -93,3 +93,9 @@ release-to-insertion timings.
 
 Paid dictation products were not benchmarked. These measurements do not establish
 that this app is faster than any or every paid tool.
+
+Wispr Flow's [September 2025 engineering post](https://wisprflow.ai/post/technical-challenges)
+describes a 700ms latency expectation after speech ends for transcription and
+formatting. It is not a measured median. This benchmark starts at key release
+and ends at verified text insertion; timing boundaries and test conditions
+differ. A direct comparison with Wispr Flow remains unmeasured.

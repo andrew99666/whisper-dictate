@@ -29,12 +29,20 @@ The tested F9 implementation was promoted to the main app on 2026-10-13; its hot
 
 Measured on one Windows machine on 2026-10-13:
 
-| Warm Key Release to Verified Insertion | Previous GPT-OSS 120B App | Optimized Qwen App |
-|---|---:|---:|
-| Median | 910ms | **451ms** |
-| Mean | 909ms | 477ms |
-| 90th percentile | 1,090ms | 580ms |
-| Trials | 12 | 12 |
+| Latency Comparison | Whisper Dictate (Optimized Qwen) | Previous GPT-OSS 120B App | Wispr Flow |
+|---|---:|---:|---|
+| Measured warm key-release-to-insertion median | **451ms** | 910ms | Not measured in our setup |
+| Measured warm mean | 477ms | 909ms | Not measured in our setup |
+| Measured warm 90th percentile | 580ms | 1,090ms | Not measured in our setup |
+| Warm trials in this benchmark | 12 | 12 | 0 |
+| Published engineering latency goal, not a measured median | Not specified | Not specified | Within 700ms after speech ends; see source below |
+
+Wispr Flow's [engineering post](https://wisprflow.ai/post/technical-challenges)
+(September 11, 2025) describes a 700ms expectation for transcription and LLM
+formatting after the user stops speaking. That is a vendor latency budget, not
+a measured current Windows median or a verified text-insertion benchmark. Our
+timer starts at key release and ends at verified insertion. **These numbers
+are not a head-to-head test, and no speed ratio against Wispr Flow is established.**
 
 **2.02x the median speed, or 50.4% less waiting, versus this project's previous
 120B pipeline.** Four actual recordings were replayed at their native duration,
@@ -46,10 +54,12 @@ dictation. See [SPEED_REPORT.md](SPEED_REPORT.md) and the
 
 Against the historical Gemini 3.5 Flash-Lite measurements, median transcription plus cleanup was 1,109ms then versus 433ms in the final F9 benchmark, roughly 2.6x. These were different recordings and separate runs, not a controlled direct comparison. There is no equivalent Gemini key-release-to-insertion measurement.
 
-**Paid-tool comparison:** this is a subscription-free app alternative, but paid
-dictation tools have not been benchmarked here. The measurements do not establish
-that it is faster than every paid tool. Network latency, provider load, retries,
-quotas, microphone hardware, and message length can all change the result.
+**Wispr Flow comparison:** Whisper Dictate demonstrates a sub-half-second median
+in its own matched replay trial. To establish whether it is faster than Wispr
+Flow, both apps need the same recordings, hardware, network, timing boundaries,
+and quality checks. Wispr Flow and other paid dictation tools have not been
+benchmarked here. Network latency, provider load, retries, quotas, microphone
+hardware, and message length can all change the result.
 
 **Known recognition issue:** short repeated phrases such as "test test test" can be misrecognized by Whisper before cleanup. Capture-tail, full Whisper V3, and independent Gemini tests did not establish a reliable fix. See [SHORT_SPEECH_DIAGNOSIS.md](SHORT_SPEECH_DIAGNOSIS.md).
 
