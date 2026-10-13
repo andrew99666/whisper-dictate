@@ -47,4 +47,3 @@ not distributed in this repository. Google was used only for the explicitly
 authorized diagnostic comparison, not in the live pipeline.
 
 The earlier 2.02x median speed result covered four different recordings. It does not establish accuracy on short repeated-word utterances. This failing case must be included in future quality evaluations.
-

@@ -93,4 +93,3 @@ release-to-insertion timings.
 
 Paid dictation products were not benchmarked. These measurements do not establish
 that this app is faster than any or every paid tool.
-
