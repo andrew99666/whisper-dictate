@@ -17,7 +17,7 @@ MODEL_ID = "whisper-large-v3-turbo"
 @dataclass
 class Transcription:
     text: str
-    language: str  # ISO code Whisper returned, e.g. "en", "ru"
+    language: str  # Provider language label, often a name such as "English" or "Polish".
     encode_ms: float = 0.0
     request_ms: float = 0.0
     audio_bytes: int = 0

@@ -2,7 +2,7 @@
 
 The optimized candidate is now the main app, using Right Ctrl. References to the
 original being unchanged describe the historical paired benchmark. This run
-predates the visual-only overlay refresh. Raw recordings and transcripts remain
+predates the overlay refresh and subsequent prompt-wording clarification. Raw recordings and transcripts remain
 private; [anonymized per-trial metrics](docs/benchmark-2026-10-13.json) are published.
 
 Measured on 2026-10-13, on this Windows machine and Groq account.
@@ -62,7 +62,7 @@ Stage medians were stop 51ms to 2ms, transcription 305ms to 250ms, cleanup 441ms
 - Follow-up failure: three short "test test test" dictations produced different raw Whisper transcripts, before Qwen. Two of three saved re-tests were wrong; an independent Gemini comparison was not reliable across all three. No general fix is validated. See [SHORT_SPEECH_DIAGNOSIS.md](SHORT_SPEECH_DIAGNOSIS.md). The speed result below is not an accuracy guarantee on this case.
 
 - The benchmarked version passed 40 tests and native microphone lifecycle checks.
-  The current app passes 51 tests including the refreshed overlay. Original
+  The current app passes 53 tests including the refreshed overlay and prompt wording. Original
   application and prompt hashes matched the preserved snapshot during the run.
 - Twenty additional Qwen temperature-zero text checks passed content invariants for work messages, email, chat, technical names/commands, repeated words, Russian, and inert AI requests. This is limited coverage, not universal quality equivalence.
 - Qwen at temperature 0.2 sometimes removed an uncertainty/read-aloud clause. That faster run was rejected. Temperature zero retained it in repeated probes and every final audio replay; the runtime guard adds another check.

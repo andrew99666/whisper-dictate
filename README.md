@@ -1,8 +1,10 @@
-# Whisper Dictate - Fast Voice Dictation for Windows
+# Whisper Dictate - Fast Multilingual Dictation for Windows
 
-Voice dictation for Windows. Hold Right Ctrl, speak, release: clean text is pasted into the focused app. Uses [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription and [Qwen 3.8 27B on Groq](https://console.groq.com/docs/model/qwen/qwen3.8-27b) for cleanup, with GPT-OSS 120B fallback. One Groq API key covers both stages.
+Multilingual voice dictation for Windows. Hold Right Ctrl, speak, release: clean text is pasted into the focused app. Uses [Groq Whisper Large v3 Turbo](https://console.groq.com/docs/model/whisper-large-v3-turbo) for transcription and [Qwen 3.8 27B on Groq](https://console.groq.com/docs/model/qwen/qwen3.8-27b) for cleanup, with GPT-OSS 120B fallback. One Groq API key covers both stages.
 
-Auto-detects **English and Russian** per utterance (Whisper supports 99+ languages).
+**99+ languages with automatic language detection**, according to
+[Groq's Whisper Large V3 Turbo documentation](https://console.groq.com/docs/model/whisper-large-v3-turbo).
+The app is not restricted to English or Russian.
 
 **451ms measured median from key release to text insertion. No app subscription.**
 Source available for noncommercial use; cloud API usage is billed by Groq.
@@ -22,6 +24,23 @@ and uploaded as lossless 16-bit FLAC. Cleanup receives text only. Qwen is a
 [preview model](https://console.groq.com/docs/model/qwen/qwen3.8-27b); GPT-OSS
 is used if the primary request fails or conservative content checks flag a result.
 If cleanup fails overall, the app preserves the raw Whisper transcript.
+
+## Languages
+
+Transcription inherits Whisper Large V3 Turbo's documented **99+ language**
+coverage. No language is forced and there is no English/Russian-only allowlist:
+the model detects the spoken language for each recording.
+
+Default, email, chat, and code cleanup instructions preserve the transcript's
+language, including multilingual passages. They do not intentionally translate
+it. The separate **Translate to English** mode is the explicit translation option.
+
+Language coverage is a model capability, not a guarantee of equal accuracy in
+every language. Recognition varies with language, accent, microphone quality,
+and recording length. Short or ambiguous recordings can be assigned the wrong
+language. The app has not been tested end-to-end across all supported languages;
+recent English, Russian, and Polish text-cleanup checks are limited smoke tests,
+not a multilingual speech-recognition benchmark.
 
 ## Speed
 
@@ -48,7 +67,7 @@ are not a head-to-head test, and no speed ratio against Wispr Flow is establishe
 120B pipeline.** Four actual recordings were replayed at their native duration,
 with alternating implementation order and verified native paste. Mean improvement
 was 1.90x; the longest sample improved only 1.34x. These are reference pipeline
-measurements taken before the visual-only overlay refresh, not a promise for every
+measurements taken before the overlay refresh and later prompt-wording updates, not a promise for every
 dictation. See [SPEED_REPORT.md](SPEED_REPORT.md) and the
 [anonymized trial timings](docs/benchmark-2026-10-13.json).
 
@@ -133,7 +152,7 @@ The historical 120B checks preserved Russian, translated in translate mode, form
 - **Pre-flight mic mute check + auto-unmute** — every PTT press first checks whether the default mic is muted (~0.2ms call into a thread-isolated `pycaw` worker). If muted, it unmutes; if it *can't* be unmuted (hardware mute switch / no permission), the overlay shows a solid red **"Mic muted"** pill instead of "Recording" and the recording is skipped entirely. No more silently dictating into a muted mic and getting Whisper's "Thank you" hallucination pasted into your window.
 - **Silent-mic guard** (final safety net) — if recording somehow still captures essentially silence (peak < 0.005), the pipeline short-circuits before the API call and toasts a warning instead of pasting hallucinated text.
 - **Auto-start at login** (optional one-line PowerShell).
-- **Bilingual** — automatic English/Russian detection (any of Whisper's 99+ languages will work; only EN/RU are explicitly tested).
+- **Multilingual** - automatic detection across Whisper Turbo's documented 99+ languages, without an English/Russian restriction. Cleanup instructions preserve the original language. Coverage and accuracy limitations are described in [Languages](#languages).
 
 ## Why this exists
 
@@ -277,7 +296,7 @@ Python 3.12 · [PySide6](https://doc.qt.io/qtforpython-6/) (Qt) for the floating
 .\.venv\Scripts\python.exe tests\render_overlay.py
 ```
 
-The 51 tests cover capture, clipboard paste, cleanup/fallback, connection warmup,
+The 53 tests cover capture, clipboard paste, cleanup/fallback, connection warmup,
 configuration, and the overlay. Previews render the actual widget at 100%, 150%,
 and 200% scale without using the microphone or calling any API. On Windows,
 `tests\render_overlay.py --native` also checks that visible states do not take focus.
